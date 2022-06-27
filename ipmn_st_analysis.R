@@ -20,7 +20,6 @@ library(igraph)
 library(msigdbr)
 library(clusterProfiler)
 
-
 ##################################################
 # Configuration
 ##################################################
@@ -43,18 +42,18 @@ cptac_panc_file <- file.path(data_dir, "cptac_panc_supp_mmc3.xlsx")
 gs_wikipathways_file <- file.path(data_dir, "WikiPathways_2019_Human.txt")
 gs_reactome_file <- file.path(data_dir, "Reactome_2016.txt")
 
-
 # segments included
-analysis_segments = c("panck", "cd45", "sma")
+analysis_segments = c("panck")
 
 # qc filtering parameters
-qc_min_counts = 100000
-qc_min_auc = 0.65
+qc_min_counts = 50000
+qc_min_auc = 0.60
 qc_negprobe_lod_quantile = 0.9
 qc_min_negprobe_geomean = 1
-qc_min_frac_expr = 0.2
+qc_min_frac_expr = 0.1
 
 # de params
+de_norm_method = "RLE"
 de_padj_cutoff = 0.05
 de_log2fc_cutoff = 1.0
 
@@ -68,8 +67,14 @@ tsne_results_xlsx_file <- "tsne_allgenes.xlsx"
 de_results_hist_xlsx <- "de_results_hist.xlsx"
 de_results_grade_xlsx <- "de_results_grade.xlsx"
 gsea_results_xlsx <- "gsea_results.xlsx"
+cta_bg_gene_symbols_txt <- "cta_gene_symbols.txt"
 
 # output directories
+if (!dir.exists(working_dir)) {
+  dir.create(working_dir)
+}
+setwd(working_dir)
+
 plot_dir <- file.path(working_dir, "plots")
 if (!dir.exists(plot_dir)) {
   dir.create(plot_dir)
@@ -99,11 +104,13 @@ get_color_scales <- function(slide_ids) {
     histology = c(pb = "#32cd32", intestinal = "#670092", gf="#1677c4"),
     histology2 = c(intestinal = "#fff01f", pb = "#1BF118", gf="#360167"),
     histpath = c(panck_intlgd="#f0ceff", panck_inthgd="#b042ff", 
-                 panck_pblgd="#9df985", panck_pbhgd="#00ab08",
-                 cd45_intlgd="#86c3fa", cd45_inthgd="#1750ac",
-                 cd45_pblgd="#fff192", cd45_pbhgd="#ffd400",
-                 sma_intlgd="#ff9090", sma_inthgd="#ec0000",
-                 sma_pblgd="#ffddb3", sma_pbhgd="#ff8c00"),
+                 panck_pblgd="#9df985", panck_pbhgd="#00ab08"),
+    # histpath = c(panck_intlgd="#f0ceff", panck_inthgd="#b042ff", 
+    #              panck_pblgd="#9df985", panck_pbhgd="#00ab08",
+    #              cd45_intlgd="#86c3fa", cd45_inthgd="#1750ac",
+    #              cd45_pblgd="#fff192", cd45_pbhgd="#ffd400",
+    #              sma_intlgd="#ff9090", sma_inthgd="#ec0000",
+    #              sma_pblgd="#ffddb3", sma_pbhgd="#ff8c00"),
     #histpath = c(panck_intlgd="#f0ceff", panck_inthgd="#c175ff", panck_pblgd="#00ffff", panck_pbhgd="#00bb00"),
     hgd_histology = c(pb = "#32cd32", intestinal = "#670092"),
     carcinoma = c(no = "#666666", yes = "#ff0000"),
@@ -116,8 +123,6 @@ get_color_scales <- function(slide_ids) {
   color_scales$slide_id = setNames(x, unique(slide_ids))
   return(color_scales)
 }
-
-
 
 
 ##################################################
@@ -268,14 +273,29 @@ counts_probe <- select(ipmn$counts,
                        -all_of(ipmn$metadata$aoi_id),
                        all_of(metadata$aoi_id))
 
-# merge multiple probes per gene to a single mean per gene
+# merge multiple probes per gene to a single geometric mean per gene
 counts_gene <- merge_probes_to_genes(counts_probe, metadata$aoi_id)
 gene_symbols <- AnnotationDbi::mapIds(org.Hs.eg.db::org.Hs.eg.db, 
                                       keys=as.character(counts_gene$entrez_id),
                                       column="SYMBOL", 
                                       keytype="ENTREZID", 
                                       multiVals="first")
-counts_gene <- mutate(counts_gene, gene_symbol = gene_symbols, .after = "entrez_id")
+counts_gene <- counts_gene %>% 
+  mutate(gene_symbol = gene_symbols, 
+         probe_type = "gene",
+         .after = "entrez_id")
+
+# keep negative probes for downstream qc analysis
+counts_negprobe <- counts_probe %>%
+  filter(CodeClass == "Negative") %>%
+  mutate(gene_symbol = paste0("GEOMX_CTA_NEGPROBE_", ProbeName),
+         probe_type = "negative",
+         frac_expr = 0.0) %>%
+  select(entrez_id = GeneID,
+         gene_symbol,
+         probe_type,
+         frac_expr,
+         all_of(metadata$aoi_id))
 
 # filter aois based on qc parameters
 metadata <- metadata %>%
@@ -284,19 +304,24 @@ metadata <- metadata %>%
 
 # filter aois
 fmetadata <- filter(metadata, !qcfail)
-counts_gene <- select(counts_gene,
-                      -all_of(metadata$aoi_id), 
-                      all_of(fmetadata$aoi_id))
-
 # compute quantiles of important qc metrics
 fmetadata <- fmetadata %>%
   mutate(negprobe_quant = factor(ntile(negprobe_geomean, 4)),
          auc_quant = factor(ntile(auc, 4)),
          count_quant = factor(ntile(num_counts, 4)))
 
+# filter count matrix
+counts_gene <- select(counts_gene,
+                      -all_of(metadata$aoi_id), 
+                      all_of(fmetadata$aoi_id))
+
+counts_negprobe <- select(counts_negprobe,
+                          -all_of(metadata$aoi_id), 
+                          all_of(fmetadata$aoi_id))
+
 # fraction of aois expressing each genes
 frac_expr <- calc_frac_expr(select(counts_gene, fmetadata$aoi_id), fmetadata$negprobe_lod)
-counts_gene <- mutate(counts_gene, frac_expr = frac_expr, .after = "gene_symbol")
+counts_gene <- mutate(counts_gene, frac_expr = frac_expr, .after = "probe_type")
 
 # filter genes with low expression
 fcounts_gene <- filter(counts_gene, frac_expr > qc_min_frac_expr)
@@ -319,6 +344,7 @@ fcounts_bgsub_gene_mat <- round(fcounts_bgsub_gene_mat)
 write_xlsx(
   list(unfiltered_metadata = metadata,
        unfiltered_counts_probe = counts_probe,
+       counts_negprobe = counts_negprobe,
        metadata = fmetadata,
        gene_meta = gene_meta,
        unfiltered_gene_counts = counts_gene,
@@ -331,12 +357,6 @@ write_xlsx(
 
 # setup samples
 samples <- fmetadata
-
-# extra params
-samples <- mutate(samples, 
-                  region = ifelse(segment == "panck", "epithelia", "stroma"))
-samples$region <- factor(samples$region, levels=c("stroma", "epithelia"))
-
 samples$slide_id <- factor(samples$slide_id)
 samples$aoi_id <- factor(samples$aoi_id)
 samples$path <- factor(samples$path, levels=c("lgd", "hgd"))
@@ -352,44 +372,6 @@ table(samples$histpath)
 # color scales for plots
 color_scales <- get_color_scales(unique(samples$slide_id))
 
-# panck data
-panck = list()
-panck$samples <- filter(samples, segment == "panck")
-panck$samples$region <- factor(panck$samples$region)
-panck$samples$histology <- factor(panck$samples$histology)
-panck$samples$carcinoma <- factor(panck$samples$carcinoma)
-panck$samples$histpath <- factor(panck$samples$histpath)
-panck$bgsub_gene_mat <- fcounts_bgsub_gene_mat[, panck$samples$aoi_id]
-panck$qnorm_gene_mat <- fcounts_qnorm_gene_mat[, panck$samples$aoi_id]
-panck$gene_meta <- gene_meta
-
-# cd45 data
-cd45 = list()
-cd45$samples <- filter(samples, segment == "cd45")
-cd45$samples$region <- factor(cd45$samples$region)
-cd45$samples$histology <- factor(cd45$samples$histology)
-cd45$samples$path <- factor(cd45$samples$path)
-cd45$samples$carcinoma <- factor(cd45$samples$carcinoma)
-cd45$samples$histpath <- factor(cd45$samples$histpath)
-cd45$bgsub_gene_mat <- fcounts_bgsub_gene_mat[, cd45$samples$aoi_id]
-cd45$qnorm_gene_mat <- fcounts_qnorm_gene_mat[, cd45$samples$aoi_id]
-cd45$gene_meta <- gene_meta
-
-# sma data
-sma = list()
-sma$samples <- filter(samples, segment == "sma")
-sma$samples$region <- factor(sma$samples$region)
-sma$samples$histology <- factor(sma$samples$histology)
-sma$samples$path <- factor(sma$samples$path)
-sma$samples$carcinoma <- factor(sma$samples$carcinoma)
-sma$samples$histpath <- factor(sma$samples$histpath)
-sma$bgsub_gene_mat <- fcounts_bgsub_gene_mat[, sma$samples$aoi_id]
-sma$qnorm_gene_mat <- fcounts_qnorm_gene_mat[, sma$samples$aoi_id]
-sma$gene_meta <- gene_meta
-table(sma$samples$path)
-table(sma$samples$histology)
-table(sma$samples$histpath)
-
 ##################################################
 #
 # Quality Control Plots
@@ -402,8 +384,6 @@ summary(metadata$num_counts)
 summary(metadata$pct_expressed)
 table(metadata$qcfail, metadata$segment)
 table(counts_gene$frac_expr > qc_min_frac_expr)
-summary(filter(metadata, segment == "panck") %>% select(AOINucleiCount))
-summary(filter(metadata, segment != "panck") %>% select(AOINucleiCount))
 
 # figure: AOINucleiCount versus num_counts
 x <- cor.test(metadata$AOINucleiCount, metadata$num_counts)
@@ -421,8 +401,9 @@ p <- ggplot(metadata, aes(x=AOINucleiCount, y=num_counts, color=qcfail)) +
   xlab("Nuclei Count") +
   ylab("Total Counts") +
   labs(color = "QC Filtering") +
-  annotate("text", x=10, y=2e3, label = corlab) +
+  annotate("text", x=1e3, y=1e4, label = corlab) +
   theme_minimal()
+p
 f <- file.path(plot_dir, "scatter_nuclei_vs_counts.pdf")
 ggsave(f, plot=p, device="pdf", width = 4, height = 3)
 
@@ -442,17 +423,19 @@ p <- ggplot(metadata, aes(x=AOISurfaceArea, y=num_counts, color=qcfail)) +
   xlab("Surface Area (um2)") +
   ylab("Total Counts") +
   labs(color = "QC Filtering") +
-  annotate("text", x=1e3, y=2e3, label = corlab) +
+  annotate("text", x=1e5, y=1e4, label = corlab) +
   theme_minimal()
+p
 f <- file.path(plot_dir, "scatter_area_vs_counts.pdf")
 ggsave(f, plot=p, device="pdf", width = 4, height = 3)
 
 # figure: total counts vs snAUC
-p <- ggplot(metadata, aes(x=num_counts, y=auc)) +
+p <- ggplot(metadata, aes(x=num_counts, y=auc, color=qcfail)) +
   geom_point() + 
   geom_hline(yintercept = qc_min_auc, linetype = "dashed", color = "red") +
   geom_vline(xintercept = qc_min_counts, linetype = "dashed", color = "red") +
   scale_x_continuous(trans="log10") +
+  scale_color_manual(values = c("FALSE" = "black", "TRUE" = "grey")) +
   xlab("Total Counts") +
   ylab("snAUC") +
   labs(color = "Segment") +
@@ -473,6 +456,7 @@ p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=AOINucleiCount)
   labs(fill = "Pathology") +
   theme(legend.position="bottom") +
   facet_grid(cols = vars(slide_id)) 
+p
 f <- file.path(plot_dir, "boxplot_path_vs_nuclei_byslide.pdf")
 ggsave(f, plot=p, device="pdf", width = 8, height = 4)
 
@@ -488,6 +472,7 @@ p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=num_counts)) +
   labs(fill = "Pathology") +
   theme(legend.position="bottom") +
   facet_grid(cols = vars(slide_id)) 
+p
 f <- file.path(plot_dir, "boxplot_path_vs_counts_byslide.pdf")
 ggsave(f, plot=p, device="pdf", width = 8, height = 4)
 
@@ -503,9 +488,9 @@ p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=auc)) +
   labs(fill = "Pathology") +
   theme(legend.position="bottom") +
   facet_grid(cols = vars(slide_id)) 
+p
 f <- file.path(plot_dir, "boxplot_path_vs_auc_byslide.pdf")
 ggsave(f, plot=p, device="pdf", width = 8, height = 4)
-
 
 # figure: gene filtering fraction expressed cutoff
 p <- ggplot(counts_gene, aes(x=frac_expr)) +
@@ -514,15 +499,21 @@ p <- ggplot(counts_gene, aes(x=frac_expr)) +
   theme_minimal() +
   xlab("Fraction Expressed Above Background") +
   ylab("# of Genes")
+p
 f <- file.path(plot_dir, "histogram_frac_expr.pdf")
 ggsave(f, plot=p, device="pdf", width = 4, height = 4)
 
 
-# figure: ridge plot unnormalized counts (expressed no/yes)
-x <- counts_gene %>%
-  select(gene_symbol, all_of(fmetadata$aoi_id)) %>%
-  column_to_rownames("gene_symbol")
-x$expressed <- ifelse(counts_gene$frac_expr <= qc_min_frac_expr, "no", "yes")
+#
+# count ridge plots
+#
+counts_gene_neg <- bind_rows(counts_gene, counts_negprobe) %>% 
+  mutate(expressed = case_when(probe_type == "negative" ~ "bg",
+                               frac_expr <= qc_min_frac_expr ~ "no",
+                               TRUE ~ "yes"))
+
+# figure: ridge plot unnormalized counts (expressed bg/no/yes)
+x <- counts_gene_neg
 y <- select(fmetadata, aoi_id, slide_id, segment, hgd_histology, path, count_quant, auc_quant)
 x <- x %>%
   pivot_longer(fmetadata$aoi_id, names_to="aoi_id", values_to="count") %>%
@@ -536,42 +527,47 @@ p <- x %>%
   labs(fill = "Expressed") +
   theme_ridges() + 
   theme(axis.text = element_text(size=5))
-f <- file.path(plot_dir, "ridge_plot_rawcounts_vs_qcfilter.pdf")
+p
+f <- file.path(plot_dir, "ridge_plot_rawcounts_by_aoi.pdf")
 ggsave(f, plot=p, device="pdf", width = 8, height = 8)
 
 
-# gene count ridge plots
-x <- counts_gene %>%
+# normalized count ridge plots
+x <- counts_gene_neg %>% 
   select(gene_symbol, all_of(fmetadata$aoi_id)) %>%
   column_to_rownames("gene_symbol")
 x <- round(background_subtract(x, fmetadata$negprobe_geomean))
 x <- DGEList(counts = x)
-x <- calcNormFactors(x, method="upperquartile")
+x <- calcNormFactors(x, method=de_norm_method)
 x <- cpm(x, log=TRUE, prior.count=0)
 x <- as_tibble(x, rownames="gene_symbol")
-x$expressed <- ifelse(counts_gene$frac_expr <= qc_min_frac_expr, "no", "yes")
+x$probe_type <- counts_gene_neg$probe_type
+x$expressed <- counts_gene_neg$expressed
 y <- select(fmetadata, aoi_id, slide_id, segment, hgd_histology, path, count_quant, auc_quant)
 x <- x %>%
   pivot_longer(fmetadata$aoi_id, names_to="aoi_id", values_to="count") %>%
   inner_join(y, by=c("aoi_id"="aoi_id"))
 
+# by slide
 p <- x %>%
-  ggplot(aes(x=count, y=factor(aoi_id), fill=factor(expressed))) +
-  stat_density_ridges(alpha=0.7, scale=10, rel_min_height=0.001, quantile_lines=TRUE) + 
+  ggplot(aes(x=count, y=factor(slide_id), fill=factor(expressed))) +
+  stat_density_ridges(alpha=0.7, scale=2, rel_min_height=0.001, quantile_lines=TRUE) + 
   xlab("Counts per million reads (CPM)") +
-  ylab("AOIs") +
+  ylab("Slides") +
   labs(fill = "Expressed") +
   theme_ridges() + 
   theme(axis.text = element_text(size=5))
-f <- file.path(plot_dir, "ridge_plot_aoi_vs_qcfilter.pdf")
+p
+f <- file.path(plot_dir, "ridge_plot_cpm_by_slide.pdf")
 ggsave(f, plot=p, device="pdf", width = 8, height = 8)
+
 
 # filtered gene ridge plots
 x <- DGEList(counts = fcounts_bgsub_gene_mat)
-x <- calcNormFactors(x, method = "upperquartile")
+x <- calcNormFactors(x, method = de_norm_method)
 x <- cpm(x, log=TRUE, prior.count=0)
 x <- as_tibble(x, rownames="gene_symbol")
-y <- select(fmetadata, aoi_id, slide_id, segment, histology, path, count_quant, auc_quant)
+y <- select(fmetadata, aoi_id, slide_id, segment, histology, path, histpath)
 x <- x %>%
   pivot_longer(fmetadata$aoi_id, names_to="aoi_id", values_to="count") %>%
   inner_join(y, by=c("aoi_id"="aoi_id"))
@@ -585,7 +581,8 @@ p <- x %>%
   labs(fill = "Slide #") +
   theme_ridges() +
   theme(axis.text = element_text(size=5))
-f <- file.path(plot_dir, "ridge_plot_aoi_vs_slide.pdf")
+p
+f <- file.path(plot_dir, "ridge_plot_log2cpm_by_aoislide.pdf")
 ggsave(f, plot=p, device="pdf", width = 8, height = 8)
 
 p <- filter(x, segment == "panck") %>%
@@ -597,20 +594,22 @@ p <- filter(x, segment == "panck") %>%
   labs(fill = "Pathology") +
   theme_ridges() + 
   theme(legend.position="bottom")
-f <- file.path(plot_dir, "ridge_plot_path.pdf")
+p
+f <- file.path(plot_dir, "ridge_plot_log2cpm_by_path.pdf")
 ggsave(f, plot=p, device="pdf", width = 4, height = 4)
 
 
 p <- filter(x, segment == "panck") %>%
   ggplot(aes(x=count, y=histology, fill=histology)) +
   stat_density_ridges(alpha=0.7, scale=3, rel_min_height=0.001, quantile_lines=TRUE) + 
-  scale_fill_manual(values = color_scales$histology2) +
+  scale_fill_manual(values = color_scales$histology) +
   xlab("log2(cpm)") +
   ylab("Histology") +
   labs(fill = "Histology") +
   theme_ridges() + 
   theme(legend.position="bottom")
-f <- file.path(plot_dir, "ridge_plot_hist.pdf")
+p
+f <- file.path(plot_dir, "ridge_plot_log2cpm_by_hist.pdf")
 ggsave(f, plot=p, device="pdf", width = 4, height = 4)
 
 
@@ -650,67 +649,43 @@ run_pca <- function(x, meta) {
   return(list(pr = pr, tbl=pca_tbl))
 }
 
-normalize_voom_q3 <- function(m, s, g) {
+normalize_voom <- function(m, s, g, norm_method) {
   y <- DGEList(counts = m, samples = s, genes = g)
-  y <- calcNormFactors(y, method = "upperquartile")
-  v <- voom(y)
+  y <- calcNormFactors(y, method = norm_method)
+  v <- voom(y, plot=TRUE)
   return(v$E)
 }
 
-#
-# full dataset (epithelia plus stroma)
-#
-voom_bgsub_q3 <- normalize_voom_q3(fcounts_bgsub_gene_mat, samples, gene_meta)
-pca_res <- run_pca(voom_bgsub_q3, samples)
+# quantile normalization
+y <- DGEList(counts=fcounts_qnorm_gene_mat,
+             samples=samples,
+             genes=gene_meta)
+qnorm_bgsub_lcpm <- as_tibble(cpm(y, log=TRUE, prior.count = 0), rownames="gene_symbol") %>%
+  column_to_rownames("gene_symbol")
+# voom normalization
+# voom_bgsub_lcpm <- normalize_voom(fcounts_bgsub_gene_mat, samples, gene_meta, de_norm_method)
+pca_res <- run_pca(qnorm_bgsub_lcpm, samples)
 pca_tbl <- pca_res$tbl
-tsne_res <- run_tsne(voom_bgsub_q3, samples, perp=11)
+tsne_res <- run_tsne(qnorm_bgsub_lcpm, samples, perp=11)
 tsne_tbl <- tsne_res$tbl
 # write_xlsx(tsne_tbl, file.path(working_dir, tsne_results_xlsx_file))
-# tsne_tbl <- read_xlsx(file.path(working_dir, tsne_results_xlsx_file), sheet = "Sheet1")
+tsne_tbl <- read_xlsx(file.path(working_dir, tsne_results_xlsx_file), sheet = "Sheet1")
 
 # pca
 pr <- pca_res$pr
 pct <- round(pr$sdev / sum(pr$sdev) * 100, 2)
 pct <- paste(colnames(pr$x), " (", paste(as.character(pct), "%", ")", sep=""), sep="")
-p <- ggplot(pca_tbl, aes(x=PC1, y=PC2, color=region)) +
-  geom_point(size=3) +
-  scale_color_manual(values=color_scales$region) +
-  theme_minimal() +
-  labs(x=pct[1], y=pct[2])
-p
-p <- ggplot(pca_tbl, aes(x=PC1, y=PC2, color=histology)) +
+p <- ggplot(pca_tbl, aes(x=PC1, y=PC2, color=histology, shape=path)) +
   geom_point(size=3) +
   scale_color_manual(values=color_scales$histology) +
   theme_minimal() +
   labs(x=pct[1], y=pct[2])
 p
-
+f <- file.path(plot_dir, "pca_histology.pdf")
+ggsave(f, plot=p, device="pdf", width=6, height=5)
 
 # tsne
-p <- ggplot(tsne_tbl, aes(x=tsne1, y=tsne2, color=region)) +
-  geom_point(size=2) +
-  scale_color_manual(values=color_scales$region) +
-  ggtitle('tSNE clustering') +
-  theme_minimal()
-p
-f <- file.path(plot_dir, "tsne_allgenes_region.pdf")
-ggsave(f, plot=p, device="pdf", width=5, height=4)
-
-p <- ggplot(tsne_tbl, aes(x=tsne1, y=tsne2, color=histology)) +
-  geom_point(size=2) +
-  scale_color_manual(values=color_scales$histology) +
-  theme_minimal()
-p
-f <- file.path(plot_dir, "tsne_allgenes_histology.pdf")
-ggsave(f, plot=p, device="pdf", width=5, height=4)
-
-
-#
-# panck data (epithelial)
-#
-panck_tsne_tbl <- filter(tsne_tbl, segment == "panck")
-
-p <- ggplot(panck_tsne_tbl, aes(x=tsne1, y=tsne2, color=histology, shape=path)) +
+p <- ggplot(tsne_tbl, aes(x=tsne1, y=tsne2, color=histology, shape=path)) +
   geom_point(size=3) +
   scale_color_manual(values=color_scales$histology) +
   theme_minimal()
@@ -719,7 +694,7 @@ f <- file.path(plot_dir, "tsne_panck_histology.pdf")
 ggsave(f, plot=p, device="pdf", width=6, height=5)
 
 # slide
-p <- ggplot(panck_tsne_tbl, aes(x=tsne1, y=tsne2, color=slide_id, shape=path)) +
+p <- ggplot(tsne_tbl, aes(x=tsne1, y=tsne2, color=slide_id, shape=path)) +
   geom_point(size=3) +
   scale_color_manual(values=color_scales$slide_id) +
   theme_minimal()
@@ -728,7 +703,7 @@ f <- file.path(plot_dir, "tsne_panck_slide_id.pdf")
 ggsave(f, plot=p, device="pdf", width=6, height=5)
 
 # carcinoma
-p <- ggplot(panck_tsne_tbl, aes(x=tsne1, y=tsne2, color=carcinoma, shape=path)) +
+p <- ggplot(tsne_tbl, aes(x=tsne1, y=tsne2, color=carcinoma, shape=path)) +
   geom_point(size=3) +
   scale_color_manual(values=color_scales$carcinoma) +
   theme_minimal()
@@ -768,6 +743,15 @@ saveDEResults <- function(file_prefix, res, file_path=NULL) {
   write(de, file=file.path(file_path, paste0(file_prefix, "_de_genes.txt")), sep="\n")
 }
 
+limmaTrend <- function(y, design, contrasts) {
+  # limma trend de analysis
+  lcpm <- log2(y$counts)
+  fit <- lmFit(lcpm, design)
+  fit <- contrasts.fit(fit, contrasts)
+  fit <- eBayes(fit, trend=TRUE)
+  return(list(fit=fit))
+}
+
 limmaVoom <- function(y, design, contrasts) {
   # limma voom de analysis
   v <- voom(y, design, plot=TRUE)
@@ -804,8 +788,8 @@ processLimma <- function(fit, contrasts, method, padj_cutoff, log2fc_cutoff,
 #
 # histology
 #
-design <- model.matrix(~0 + histology, data=panck$samples)
-colnames(design) <- levels(panck$samples$histology)
+design <- model.matrix(~0 + histology, data=samples)
+colnames(design) <- levels(samples$histology)
 colnames(design)
 contrasts = makeContrasts(hist_pb_vs_gf = pb - gf,
                           hist_pb_vs_int = pb - intestinal,
@@ -813,75 +797,102 @@ contrasts = makeContrasts(hist_pb_vs_gf = pb - gf,
                           hist_int = intestinal - (pb + gf)/2,
                           levels=design)
 
-# voom with scale normalization
-method <- "limma_voom_bgsub_q3"
-y <- DGEList(counts=panck$bgsub_gene_mat,
-             samples=panck$samples,
-             group=panck$samples$histology,
+# limma trend with quantile normalization
+method <- "limma_trend_bgsub_qn"
+y <- DGEList(counts=fcounts_bgsub_gene_mat,
+             samples=samples,
+             group=samples$histology,
              genes=gene_meta)
-y <- calcNormFactors(y, method="upperquartile")
-x <- limmaVoom(y, design, contrasts)
+y <- calcNormFactors(y, method="TMM")
+# y <- DGEList(counts=fcounts_qnorm_gene_mat,
+#              samples=samples,
+#              group=samples$histology,
+#              genes=gene_meta)
+x <- limmaTrend(y, design, contrasts)
 res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
 hist_de <- res
-hist_voom_lcpm <- as_tibble(x$voom, rownames="gene_symbol") %>%
+hist_qnorm_lcpm <- as_tibble(cpm(y, log=TRUE, prior.count = 0), rownames="gene_symbol") %>%
   column_to_rownames("gene_symbol")
-hist_cpm <- cpm(y)
+
+# voom with scale normalization
+# method <- "limma_voom_bgsub_q3"
+# y <- DGEList(counts=fcounts_bgsub_gene_mat,
+#              samples=samples,
+#              group=samples$histology,
+#              genes=gene_meta)
+# y <- calcNormFactors(y, method=de_norm_method)
+# x <- limmaVoom(y, design, contrasts)
+# res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
+# hist_voom_lcpm <- as_tibble(x$voom, rownames="gene_symbol") %>%
+#   column_to_rownames("gene_symbol")
 
 # merged de analyses
 hist_de_merged <- select(hist_de, gene, analysis, avgexpr, log2fc, padj, de) %>%
   pivot_wider(names_from = analysis, values_from = c(log2fc, padj, de))
 
 hist_de_merged <- hist_de_merged %>%
-  mutate(de_pb = case_when(de_hist_pb_vs_gf == "up" & de_hist_pb_vs_int == "up" ~ "up",
-                           de_hist_pb_vs_gf == "dn" & de_hist_pb_vs_int == "dn" ~ "dn",
-                           TRUE ~ "no"),
-         de_int = case_when(de_hist_int_vs_gf == "up" & de_hist_pb_vs_int == "dn" ~ "up",
-                            de_hist_int_vs_gf == "dn" & de_hist_pb_vs_int == "up" ~ "dn",
-                            TRUE ~ "no"),
-         de_gf = case_when(de_hist_pb_vs_gf == "dn" & de_hist_int_vs_gf == "dn" ~ "up",
-                           de_hist_pb_vs_gf == "up" & de_hist_int_vs_gf == "up" ~ "dn",
-                           TRUE ~ "no"))
+  mutate(subtype = case_when(de_hist_pb_vs_gf == "up" & de_hist_pb_vs_int == "up" ~ "pb",
+                             de_hist_pb_vs_gf == "dn" & de_hist_int_vs_gf == "dn" ~ "gf",
+                             de_hist_int_vs_gf == "up" & de_hist_pb_vs_int == "dn" ~ "int",
+                             de_hist_int_vs_gf == "dn" & de_hist_pb_vs_int == "up" ~ "pbgf",
+                             de_hist_pb_vs_gf == "up" & de_hist_int_vs_gf == "up" ~ "pbint",
+                             de_hist_pb_vs_gf == "dn" & de_hist_int_vs_gf == "up" ~ "intgf",
+                             TRUE ~ "none"))
+
+
+hist_de_merged %>% filter(gene == "CLU") %>% as.data.frame()
+table(hist_de_merged$subtype)
 
 # write results
-write_xlsx(list(samples = panck$samples,
+write_xlsx(list(samples = samples,
                 gene_meta = gene_meta,
                 de = hist_de,
                 merged_de = hist_de_merged,
-                voom_lcpm = hist_voom_lcpm,
-                cpm = as_tibble(hist_cpm, rownames="gene_symbol")),
+                norm_lcpm = hist_qnorm_lcpm),
            file.path(working_dir, de_results_hist_xlsx))
-
 
 #
 # grade
 #
-table(panck$samples$histpath)
-design <- model.matrix(~0 + histpath, data=panck$samples)
+table(samples$histpath)
+design <- model.matrix(~0 + histpath, data=samples)
 colnames(design)
-colnames(design) <- levels(panck$samples$histpath)
+colnames(design) <- levels(samples$histpath)
 colnames(design)
-contrasts = makeContrasts(path_pbhgd_vs_intlgd = panck_pbhgd - panck_intlgd,
+contrasts = makeContrasts(path_hgd_vs_lgd = (panck_pbhgd + panck_inthgd)/2 - (panck_intlgd + panck_pblgd)/2,
+                          path_pbhgd_vs_intlgd = panck_pbhgd - panck_intlgd,
                           path_pbhgd_vs_pblgd = panck_pbhgd - panck_pblgd,
                           path_inthgd_vs_intlgd = panck_inthgd - panck_intlgd,
                           path_inthgd_vs_pblgd = panck_inthgd - panck_pblgd,
-                          path_hgd_vs_lgd = (panck_pbhgd + panck_inthgd)/2 - (panck_intlgd + panck_pblgd)/2,
+                          path_intlgd_vs_pblgd = panck_intlgd - panck_pblgd,
                           path_pbhgd_vs_inthgd = panck_pbhgd - panck_inthgd,
-                          path_pblgd_vs_intlgd = panck_pblgd - panck_intlgd,
                           levels=design)
 
-# voom with scale normalization
-method <- "limma_voom_bgsub_q3"
-y <- DGEList(counts=panck$bgsub_gene_mat,
-             samples=panck$samples,
-             group=panck$samples$histpath,
+# limma trend with quantile normalization
+method <- "limma_trend_bgsub_qn"
+y <- DGEList(counts=fcounts_qnorm_gene_mat,
+             samples=samples,
+             group=samples$histpath,
              genes=gene_meta)
-y <- calcNormFactors(y, method="upperquartile")
-x <- limmaVoom(y, design, contrasts)
+x <- limmaTrend(y, design, contrasts)
 res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
 grade_de <- res
-grade_voom_lcpm <- as_tibble(x$voom, rownames="gene_symbol") %>%
+grade_qnorm_lcpm <- as_tibble(cpm(y, log=TRUE, prior.count = 0), rownames="gene_symbol") %>%
   column_to_rownames("gene_symbol")
-grade_cpm <- cpm(y)
+
+# voom with scale normalization
+# method <- "limma_voom_bgsub_q3"
+# y <- DGEList(counts=fcounts_bgsub_gene_mat,
+#              samples=samples,
+#              group=samples$histpath,
+#              genes=gene_meta)
+# y <- calcNormFactors(y, method=de_norm_method)
+# x <- limmaVoom(y, design, contrasts)
+# res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
+# grade_de <- res
+# grade_voom_lcpm <- as_tibble(x$voom, rownames="gene_symbol") %>%
+#   column_to_rownames("gene_symbol")
+# grade_cpm <- cpm(y)
 
 # merged de analyses
 grade_de_merged <- select(grade_de, gene, analysis, avgexpr, log2fc, padj, de) %>%
@@ -901,58 +912,8 @@ write_xlsx(list(samples = samples,
                 gene_meta = gene_meta,
                 de = grade_de,
                 merged_de = grade_de_merged,
-                voom_lcpm = grade_voom_lcpm,
-                cpm = as_tibble(grade_cpm, rownames="gene_symbol")),
+                norm_lcpm = grade_qnorm_lcpm),
            file.path(working_dir, de_results_grade_xlsx))
-
-
-#
-# cd45 data
-#
-method <- "limma_voom_bgsub_q3"
-design <- model.matrix(~0 + histpath, data=cd45$samples)
-colnames(design)
-colnames(design) <- levels(cd45$samples$histpath)
-colnames(design)
-contrasts = makeContrasts(cd45_hgd_vs_lgd = (cd45_inthgd + cd45_pbhgd)/2 - (cd45_intlgd + cd45_pblgd)/2,
-                          cd45_pbhgd_vs_pblgd = cd45_pbhgd - cd45_pblgd,
-                          cd45_inthgd_vs_intlgd = cd45_inthgd - cd45_intlgd,
-                          levels=design)
-
-# voom with scale normalization
-y <- DGEList(counts=cd45$bgsub_gene_mat,
-             samples=cd45$samples,
-             genes=gene_meta)
-y <- calcNormFactors(y, method="upperquartile")
-x <- limmaVoom(y, design, contrasts)
-res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
-cd45_de <- res
-cd45_voom_lcpm <- as_tibble(x$voom, rownames="gene_symbol") %>%
-  column_to_rownames("gene_symbol")
-
-#
-# sma data
-#
-method <- "limma_voom_bgsub_q3"
-design <- model.matrix(~0 + histpath, data=sma$samples)
-colnames(design)
-colnames(design) <- levels(sma$samples$histpath)
-colnames(design)
-contrasts = makeContrasts(sma_hgd_vs_lgd = (sma_inthgd + sma_pbhgd)/2 - (sma_intlgd + sma_pblgd)/2,
-                          sma_pbhgd_vs_pblgd = sma_pbhgd - sma_pblgd,
-                          sma_inthgd_vs_intlgd = sma_inthgd - sma_intlgd,
-                          levels=design)
-
-# voom with scale normalization
-y <- DGEList(counts=sma$bgsub_gene_mat,
-             samples=sma$samples,
-             genes=gene_meta)
-y <- calcNormFactors(y, method="upperquartile")
-x <- limmaVoom(y, design, contrasts)
-res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
-sma_de <- res
-sma_voom_lcpm <- as_tibble(x$voom, rownames="gene_symbol") %>%
-  column_to_rownames("gene_symbol")
 
 ##################################################
 #
@@ -1079,8 +1040,9 @@ get_row_annot <- function(genes, gene_annot) {
 
 # define background gene set
 cta_genes <- unique(hist_de$gene)
+length(cta_genes)
 # write cta genes to file (background gene set)
-write.table(cta_genes, file=file.path(working_dir, "cta_gene_symbols.txt"),
+write.table(cta_genes, file=file.path(working_dir, cta_bg_gene_symbols_txt),
             quote=FALSE, row.names=FALSE, col.names=FALSE)
 
 # read cptac data
@@ -1105,14 +1067,11 @@ gene_annot <- gene_meta %>%
 # histology analysis heatmap
 #
 # union of subtype specific genes
-hist_pb_genes <- filter(hist_de_merged, de_pb != "no") %>% select(gene) %>% pull()
-hist_int_genes <- filter(hist_de_merged, de_int != "no") %>% select(gene) %>% pull()
-hist_gf_genes <- filter(hist_de_merged, de_gf != "no") %>% select(gene) %>% pull()
-hist_genes <- union(hist_pb_genes, union(hist_gf_genes, hist_int_genes))
-x <- hist_voom_lcpm[hist_genes,]
+hist_genes <- filter(hist_de_merged, subtype != "none") %>% select(gene) %>% pull()
+x <- hist_qnorm_lcpm[hist_genes,]
 
 annot_row <- get_row_annot(hist_genes, gene_annot)
-annot_col <- column_to_rownames(panck$samples, "aoi_id") %>% 
+annot_col <- column_to_rownames(samples, "aoi_id") %>% 
   select(histology = histology,
          pathbw = path, 
          slide_id = slide_id) %>%
@@ -1126,12 +1085,13 @@ save_pheatmap_pdf(p, filename=f, width=10, height=h)
 # grade analysis heatmap
 #
 # union of subtype hgd genes
+table(grade_de_merged$subtype)
 grade_genes <- filter(grade_de_merged, de_path_hgd_vs_lgd != "no") %>% select(gene) %>% pull()
-length(grade_genes)
+grade_genes <- filter(grade_de_merged, subtype != "none") %>% select(gene) %>% pull()
+x <- grade_qnorm_lcpm[grade_genes,]
 
-x <- hist_voom_lcpm[grade_genes,]
 annot_row <- get_row_annot(grade_genes, gene_annot)
-annot_col <- column_to_rownames(panck$samples, "aoi_id") %>% 
+annot_col <- column_to_rownames(samples, "aoi_id") %>% 
   select(histology = histology,
          pathbw = path, 
          slide_id = slide_id) %>%
@@ -1201,16 +1161,6 @@ dev.off()
 ##################################################
 #
 #
-# Volcano plots
-#
-#
-##################################################
-
-# TODO
-
-##################################################
-#
-#
 # 2D plot of DE genes
 #
 #
@@ -1276,26 +1226,21 @@ ggsave(f, plot=p, device="pdf", width=8, height=8)
 #
 # Histology Plot
 #
-colnames(hist_de_merged)
-
-x <- hist_de_merged %>%
-  mutate(subtype = case_when(de_hist_pb_vs_gf == "up" & de_hist_pb_vs_int == "up" ~ "pb",
-                             de_hist_pb_vs_gf == "dn" & de_hist_int_vs_gf == "dn" ~ "gf",
-                             de_hist_int_vs_gf == "up" & de_hist_pb_vs_int == "dn" ~ "int",
-                             de_hist_int_vs_gf == "dn" & de_hist_pb_vs_int == "up" ~ "pbgf",
-                             TRUE ~ "none"))
+x <- hist_de_merged
 
 color_scale = c(none = "#888888",
                 pb = "#32cd32",
                 int = "#670092",
                 gf = "#1677c4",
-                pbgf = "#ff6700")
+                pbgf = "#ff6700",
+                pbint = "#ff0000")
 
 size_scale = c(none = 1,
                pb = 2,
                int = 2,
                gf = 2,
-               pbgf = 2)
+               pbgf = 2,
+               pbint = 2)
 
 annot_data <- x %>%
   filter(subtype != "none")
@@ -1309,9 +1254,13 @@ label_data <- bind_rows(filter(x, subtype == "pb") %>% slice_max(log2fc_hist_pb_
                         filter(x, subtype == "int") %>% slice_max(log2fc_hist_int_vs_gf, n = 10),
                         filter(x, subtype == "int") %>% slice_min(log2fc_hist_pb_vs_int, n = 10),
                         filter(x, subtype == "pbgf") %>% slice_max(log2fc_hist_pb_vs_int, n = 10),
-                        filter(x, subtype == "pbgf") %>% slice_min(log2fc_hist_int_vs_gf, n = 10))
+                        filter(x, subtype == "pbgf") %>% slice_min(log2fc_hist_int_vs_gf, n = 10),
+                        filter(x, subtype == "pbint") %>% slice_max(log2fc_hist_pb_vs_gf, n = 10),
+                        filter(x, subtype == "pbint") %>% slice_max(log2fc_hist_int_vs_gf, n = 10))
+
 # manually add MUC1 as this is featured in plot but not in top 10
 label_data <- bind_rows(label_data, filter(x, gene == "MUC1"))
+label_data <- bind_rows(label_data, filter(x, gene == "MUC4"))
 label_data <- distinct(label_data)
 nrow(label_data)
 
@@ -1383,64 +1332,66 @@ plot_grade_boxplot <- function(s, m, gene_symbol) {
 
 # plot all de genes in heatmaps
 for (g in union(hist_genes, grade_genes)) {
-  p <- plot_hist_boxplot(panck$samples, hist_voom_lcpm, g)
+  p <- plot_hist_boxplot(samples, hist_qnorm_lcpm, g)
   f <- file.path(gene_plot_dir, paste0("boxplot_", g, "_hist.pdf"))
   ggsave(f, p, width=5, height=5)
-  p <- plot_grade_boxplot(panck$samples, grade_voom_lcpm, g)
+  p <- plot_grade_boxplot(samples, grade_qnorm_lcpm, g)
   f <- file.path(gene_plot_dir, paste0("boxplot_", g, "_grade.pdf"))
   ggsave(f, p, width=5, height=5)
 }
 
 # manually plot individual genes
-p <- plot_hist_boxplot(panck$samples, hist_voom_lcpm, "MUC1")
+p <- plot_hist_boxplot(samples, hist_qnorm_lcpm, "MUC1")
 ggsave(file.path(plot_dir, "hist_boxplot_muc1.pdf"), p, width=3, height=5)
-p <- plot_hist_boxplot(panck$samples, hist_voom_lcpm, "MUC4")
+p <- plot_hist_boxplot(samples, hist_qnorm_lcpm, "MUC4")
 ggsave(file.path(plot_dir, "hist_boxplot_muc4.pdf"), p, width=3, height=5)
-p <- plot_hist_boxplot(panck$samples, hist_voom_lcpm, "CLU")
+p <- plot_hist_boxplot(samples, hist_qnorm_lcpm, "CLU")
 ggsave(file.path(plot_dir, "hist_boxplot_clu.pdf"), p, width=3, height=5)
-p <- plot_hist_boxplot(panck$samples, hist_voom_lcpm, "RBP4")
+p <- plot_hist_boxplot(samples, hist_qnorm_lcpm, "RBP4")
 ggsave(file.path(plot_dir, "hist_boxplot_rbp4.pdf"), p, width=3, height=5)
 
 
+# matrix for plotting
+x <- qnorm_bgsub_lcpm
+
 # lymphocyte marker
-plot_grade_boxplot(samples, voom_bgsub_q3, "PTPRC")
-plot_grade_boxplot(samples, voom_bgsub_q3, "CD3D")
-plot_grade_boxplot(samples, voom_bgsub_q3, "IL7R")
+plot_grade_boxplot(samples, x, "PTPRC")
+plot_grade_boxplot(samples, x, "CD3D")
+plot_grade_boxplot(samples, x, "IL7R")
 
 # EMT-like cells
-plot_grade_boxplot(samples, voom_bgsub_q3, "ZEB1")
+plot_grade_boxplot(samples, x, "ZEB1")
 
 # ductal cells
-plot_grade_boxplot(samples, voom_bgsub_q3, "TACSTD2")
-plot_grade_boxplot(samples, voom_bgsub_q3, "KRT7")
+plot_grade_boxplot(samples, x, "TACSTD2")
+plot_grade_boxplot(samples, x, "KRT7")
 # macrophages
-plot_grade_boxplot(samples, voom_bgsub_q3, "C1QA")
-plot_grade_boxplot(samples, voom_bgsub_q3, "C1QB")
+plot_grade_boxplot(samples, x, "C1QA")
+plot_grade_boxplot(samples, x, "C1QB")
 
 # myeloid-derived suppressor cells
-plot_grade_boxplot(samples, voom_bgsub_q3, "S100A9")
-plot_grade_boxplot(samples, voom_bgsub_q3, "CCL3")
+plot_grade_boxplot(samples, x, "S100A9")
+plot_grade_boxplot(samples, x, "CCL3")
 
 # KDR and VWF for endothelial cells; and FCER1A and CD1 for dendritic cells
 # DC2 dendritic cells
-plot_grade_boxplot(samples, voom_bgsub_q3, "THBD")
+plot_grade_boxplot(samples, x, "THBD")
 
 # fibroblast marker
-plot_grade_boxplot(samples, voom_bgsub_q3, "ACTA2")
-plot_grade_boxplot(samples, voom_bgsub_q3, "COL1A1")
+plot_grade_boxplot(samples, x, "ACTA2")
+plot_grade_boxplot(samples, x, "COL1A1")
 
 # inflammatory CAF
-plot_grade_boxplot(samples, voom_bgsub_q3, "COL3A1")
-plot_grade_boxplot(samples, voom_bgsub_q3, "CXCL12")
-plot_grade_boxplot(samples, voom_bgsub_q3, "TTR")
+plot_grade_boxplot(samples, x, "COL3A1")
+plot_grade_boxplot(samples, x, "CXCL12")
+plot_grade_boxplot(samples, x, "TTR")
 
 # proliferation markers
-plot_grade_boxplot(samples, voom_bgsub_q3, "MKI67")
-plot_grade_boxplot(samples, voom_bgsub_q3, "TOP2A")
-plot_grade_boxplot(samples, voom_bgsub_q3, "CENPF")
+plot_grade_boxplot(samples, x, "MKI67")
+plot_grade_boxplot(samples, x, "TOP2A")
+plot_grade_boxplot(samples, x, "CENPF")
+plot_grade_boxplot(samples, x, "UBE2C")
 
-
-grade_de %>% filter(gene == "CENPF")
 
 ##################################################
 #
@@ -1495,13 +1446,27 @@ gruetzmann_gs <- msigdb_gene_sets %>%
 gruetzmann_gs <- split(x = gruetzmann_gs$gene_symbol,
                        f = gruetzmann_gs$gs_name)
 
+# discovery analysis across msigdb gene sets
+gs_hallmark <- filter(msigdb_gene_sets, gs_cat == "H")
+gs_hallmark <- split(x = gs_hallmark$gene_symbol, f = gs_hallmark$gs_name)
+gs_gobp <- filter(msigdb_gene_sets, gs_cat == "C5", gs_subcat == "GO:BP")
+gs_gobp <- split(x = gs_gobp$gene_symbol, f = gs_gobp$gs_name)
+
+
+#
+# Setup analysis
+#
+method <- "limma_trend_qnorm"
+table(grade_de$analysis)
+analyses <- c("path_intlgd_vs_pblgd", "path_inthgd_vs_pblgd", "path_inthgd_vs_intlgd",
+              "path_pbhgd_vs_inthgd", "path_pbhgd_vs_intlgd", "path_pbhgd_vs_pblgd",
+              "path_hgd_vs_lgd")
+de <- bind_rows(hist_de, grade_de)
+
 #
 # PDAC GSEA Analysis
 #
 prefix <- "gsea_pdac"
-method <- "limma_voom_bgsub_q3"
-analyses <- c("path_inthgd_vs_intlgd", "path_pbhgd_vs_pblgd", "path_hgd_vs_lgd")
-de <- bind_rows(hist_de, grade_de)
 gs <- gruetzmann_gs
 gs <- append(gs, hpa_panc_gs)
 gs <- append(gs, cptac_gs)
@@ -1525,10 +1490,11 @@ write_xlsx(gsea, f)
 # construct bar plots comparing analyses
 x <- filter(gsea_pdac, analysis %in% analyses)
 x$analysis <- factor(x$analysis, levels=analyses)
-x <- mutate(x, sig = ifelse(padj < 0.05, ifelse(NES < 0, "dn", "up"), "no"))
-p <- ggplot(x, aes(x=analysis, y=NES)) +
-  geom_col(aes(fill = sig)) +
-  scale_fill_manual(values = c("no"="#aaaaaa", "dn"="#0000cc", "up"="#cc0000")) +
+x <- mutate(x, sig = ifelse(padj < gsea_padj_cutoff, ifelse(NES < 0, "dn", "up"), "no"),
+            neglog10padj = ifelse(padj < gsea_padj_cutoff, -log10(padj), NA))
+p <- ggplot(x, aes(x=analysis, y=NES, fill=neglog10padj)) +
+  geom_col() +
+  scale_fill_gradient(low = "blue", high = "cyan", na.value="#aaaaaa") +
   coord_flip() +
   labs(x="Analysis", y="Normalized Enrichment Score",
        title="PDAC Gene Signatures") + 
@@ -1539,28 +1505,13 @@ ggsave(file.path(plot_dir, "gsea_pdac_barplots.pdf"), p, width=6, height=8)
 
 
 #
-# discovery analysis across msigdb gene sets
-#
-de <- bind_rows(hist_de, grade_de)
-method <- "limma_voom_bgsub_q3"
-#analyses <- c("path_hgd_vs_lgd")
-#analyses <- c("path_hgd_vs_lgd", "path_pbhgd_vs_pblgd", "path_inthgd_vs_intlgd")
-analyses <- unique(grade_de$analysis)
-color_scale <- c("path_hgd_vs_lgd" = "#ff0000",
-                 "path_inthgd_vs_intlgd" = "#670092",
-                 "path_pbhgd_vs_pblgd" = "#32cd32")
-
-gs_hallmark <- filter(msigdb_gene_sets, gs_cat == "H")
-gs_hallmark <- split(x = gs_hallmark$gene_symbol, f = gs_hallmark$gs_name)
-gs_gobp <- filter(msigdb_gene_sets, gs_cat == "C5", gs_subcat == "GO:BP")
-gs_gobp <- split(x = gs_gobp$gene_symbol, f = gs_gobp$gs_name)
-
-#
 # Hallmark gene set analysis
 #
 prefix <- "gsea_hallmark"
 gs <- gs_hallmark
 gsea = NULL
+padj_cutoff <- 0.01
+
 for (a in analyses) {
   ranks <- get_de_ranks(de, a)
   res <- fgsea(pathways = gs, stats = ranks, minSize = 10, eps = 0, nPermSimple = 10000)
@@ -1569,7 +1520,7 @@ for (a in analyses) {
   
   for (i in 1:nrow(res)) {
     x <- res[i,]
-    if (x$padj >= gsea_padj_cutoff) { next }
+    if (x$padj >= padj_cutoff) { next }
     print(x$pathway)
     p <- plot_gsea_enrichment(x, ranks, gs)
     f <- file.path(gsea_plot_dir, paste0(prefix, "_", a, "_gs_", x$pathway, ".pdf"))
@@ -1600,7 +1551,7 @@ for (a in analyses) {
 
   for (i in 1:nrow(res)) {
     x <- res[i,]
-    if (x$padj >= gsea_padj_cutoff) { next }
+    if (x$padj >= padj_cutoff) { next }
     print(x$pathway)
     p <- plot_gsea_enrichment(x, ranks, gs)
     f <- file.path(gsea_plot_dir, paste0(prefix, "_", a, "_gs_", x$pathway, ".pdf"))
@@ -1621,16 +1572,12 @@ write_xlsx(gsea, f)
 #
 # GSEA Volcano Plots
 #
-
-# hallmark
-x <- gsea_hallmark %>% filter(analysis == "path_hgd_vs_lgd")
-# x <- gsea_hallmark %>% filter(analysis %in% c("path_hgd_vs_lgd", "path_pbhgd_vs_pblgd", "path_inthgd_vs_intlgd"))
+x <- gsea_hallmark
 x$abbrev <- gsub("HALLMARK_", "", x$pathway)
 p <- ggplot(x, aes(x=NES, y=-log10(padj), color=analysis)) + 
-  geom_point(data=subset(x, padj > 0.01), size=1, alpha=0.4) + 
-  geom_point(data=subset(x, padj <= 0.01), size=2, alpha=0.8) +
-  geom_text_repel(data=subset(x, padj <= 0.01), color="black", size=3, aes(label=abbrev), max.overlaps=Inf) +
-  scale_color_manual(values = color_scale) +
+  geom_point(data=subset(x, padj > padj_cutoff), size=1, alpha=0.4) + 
+  geom_point(data=subset(x, padj <= padj_cutoff), size=2, alpha=0.8) +
+  geom_text_repel(data=subset(x, padj <= padj_cutoff), color="black", size=3, aes(label=abbrev), max.overlaps=Inf) +
   ylab("-log10(adjusted p-value)") +
   xlab("NES") +
   ggtitle("MSigDB Hallmark Gene Sets") +
@@ -1640,19 +1587,16 @@ p <- ggplot(x, aes(x=NES, y=-log10(padj), color=analysis)) +
   coord_flip() + 
   facet_wrap(~ analysis, ncol = 1)
 p
-ggsave(file.path(plot_dir, "gsea_hallmark_volcano.pdf"), plot=p, width=5, height=3)
+ggsave(file.path(plot_dir, "gsea_hallmark_volcano.pdf"), plot=p, width=10, height=10)
 
 
 # GO
-x <- gsea_gobp %>%
-  filter(analysis == "path_hgd_vs_lgd")
-#x <- gsea_gobp %>%
-#  filter(analysis %in% c("path_hgd_vs_lgd", "path_pbhgd_vs_pblgd", "path_inthgd_vs_intlgd"))
+x <- gsea_gobp
 x$abbrev <- gsub("GOBP_", "", x$pathway)
 p <- ggplot(x, aes(x=NES, y=-log10(padj), color=analysis)) + 
-  geom_point(data=subset(x, padj > 0.01), size=1, alpha=0.4) + 
-  geom_point(data=subset(x, padj <= 0.01), size=2, alpha=0.8) +
-  geom_text_repel(data=subset(x, padj <= 0.01), color="black", size=3, aes(label=abbrev), max.overlaps=Inf) +
+  geom_point(data=subset(x, padj > padj_cutoff), size=1, alpha=0.4) + 
+  geom_point(data=subset(x, padj <= padj_cutoff), size=2, alpha=0.8) +
+  geom_text_repel(data=subset(x, padj <= padj_cutoff), color="black", size=3, aes(label=abbrev), max.overlaps=Inf) +
   scale_color_manual(values = color_scale) +
   ylab("-log10(adjusted p-value)") +
   xlab("NES") +
@@ -1663,7 +1607,7 @@ p <- ggplot(x, aes(x=NES, y=-log10(padj), color=analysis)) +
   coord_flip() +
   facet_wrap(~ analysis, ncol = 1)
 p
-ggsave(file.path(plot_dir, "gsea_gobp_volcano.pdf"), plot=p, width=5, height=3)
+ggsave(file.path(plot_dir, "gsea_gobp_volcano.pdf"), plot=p, width=10, height=10)
 
 #
 # GSEA Leading Edge
@@ -1984,7 +1928,6 @@ as.data.frame(filter(grade_de_merged, gene == "LAMB3"))
 as.data.frame(grade_de_merged %>% filter(gene == "SMAD4"))
 as.data.frame(grade_de_merged %>% filter(gene == "LIF"))
 
-
 filter(grade_de_merged, de_path_pbhgd_vs_lgd != "no") %>% select(gene) %>% pull()
 as.data.frame(filter(grade_de_merged, de_path_inthgd_vs_lgd != "no"))
 as.data.frame(filter(grade_de_merged, de_inthgd != "no"))
@@ -2084,40 +2027,41 @@ cor_result_to_edges <- function(cor_result, self=FALSE) {
 # get normalized count matrices
 #
 # panck cd45
-panck_cd45_meta <- samples %>%
-  filter(segment == "panck" | segment == "cd45") %>%
-  group_by(slide_id, roi_group) %>%
-  filter(n() == 2) %>%
-  ungroup() %>%
-  mutate(pair_id = paste0("s_", slide_id, "_", roi_group)) %>%
-  arrange(pair_id)
-table(panck_cd45_meta$segment)
-
-paired_panck_cd45 <- list()
-paired_panck_cd45$panck <- subset_paired_segment(panck_cd45_meta, voom_bgsub_q3, "panck")
-paired_panck_cd45$cd45 <- subset_paired_segment(panck_cd45_meta, voom_bgsub_q3, "cd45")
+# panck_cd45_meta <- samples %>%
+#   filter(segment == "panck" | segment == "cd45") %>%
+#   group_by(slide_id, roi_group) %>%
+#   filter(n() == 2) %>%
+#   ungroup() %>%
+#   mutate(pair_id = paste0("s_", slide_id, "_", roi_group)) %>%
+#   arrange(pair_id)
+# table(panck_cd45_meta$segment)
+# 
+# paired_panck_cd45 <- list()
+# paired_panck_cd45$panck <- subset_paired_segment(panck_cd45_meta, voom_bgsub_q3, "panck")
+# paired_panck_cd45$cd45 <- subset_paired_segment(panck_cd45_meta, voom_bgsub_q3, "cd45")
 
 # panck sma
-panck_sma_meta <- samples %>%
-  filter(segment == "panck" | segment == "sma") %>%
-  group_by(slide_id, roi_group) %>%
-  filter(n() == 2) %>%
-  ungroup() %>%
-  mutate(pair_id = paste0("s_", slide_id, "_", roi_group)) %>%
-  arrange(pair_id)
-table(panck_sma_meta$segment)
-
-paired_panck_sma <- list()
-paired_panck_sma$panck <- subset_paired_segment(panck_sma_meta, voom_bgsub_q3, "panck")
-paired_panck_sma$sma <- subset_paired_segment(panck_sma_meta, voom_bgsub_q3, "sma")
+# panck_sma_meta <- samples %>%
+#   filter(segment == "panck" | segment == "sma") %>%
+#   group_by(slide_id, roi_group) %>%
+#   filter(n() == 2) %>%
+#   ungroup() %>%
+#   mutate(pair_id = paste0("s_", slide_id, "_", roi_group)) %>%
+#   arrange(pair_id)
+# table(panck_sma_meta$segment)
+# 
+# paired_panck_sma <- list()
+# paired_panck_sma$panck <- subset_paired_segment(panck_sma_meta, voom_bgsub_q3, "panck")
+# paired_panck_sma$sma <- subset_paired_segment(panck_sma_meta, voom_bgsub_q3, "sma")
 
 
 #
 # correlation analysis
 #
+norm_count_mat <- grade_qnorm_lcpm
 nperms <- 10000
 cor_qval_cutoff <- 0.01
-cor_r_cutoff <- 0.7
+cor_r_cutoff <- 0.6
 cor_weight_beta <- 4
 graph_min_csize <- 10
 graph_clust_resolution <- 0.25
@@ -2127,78 +2071,75 @@ graph_clust_resolution <- 0.25
 #                                             paired_panck_cd45$cd45$mat,
 #                                             nperms)
 # saveRDS(paired_panck_cd45$cor_result, file=file.path(working_dir, "cor_panck_cd45.rds"))
-paired_panck_cd45$cor_result <- readRDS(file.path(working_dir, "cor_panck_cd45.rds"))
+#paired_panck_cd45$cor_result <- readRDS(file.path(working_dir, "cor_panck_cd45.rds"))
 
 # panck-sma correlation
 # paired_panck_sma$cor_result <- cor_compute(paired_panck_sma$panck$mat,
 #                                            paired_panck_sma$sma$mat,
 #                                            nperms)
 # saveRDS(paired_panck_sma$cor_result, file=file.path(working_dir, "cor_panck_sma.rds"))
-paired_panck_sma$cor_result <- readRDS(file.path(working_dir, "cor_panck_sma.rds"))
+#paired_panck_sma$cor_result <- readRDS(file.path(working_dir, "cor_panck_sma.rds"))
 
 # panck self correlation
-panck_cor_mat <- grade_voom_lcpm
-rownames(panck_cor_mat) <- paste0("panck_", rownames(grade_voom_lcpm))
-# panck_cor_res <- cor_compute(panck_cor_mat, 
-#                              panck_cor_mat, 
+rownames(panck_cor_mat) <- paste0("panck_", rownames(norm_count_mat))
+# panck_cor_res <- cor_compute(panck_cor_mat,
+#                              panck_cor_mat,
 #                              nperms)
 # saveRDS(panck_cor_res, file=file.path(working_dir, "cor_panck.rds"))
 panck_cor_res <- readRDS(file.path(working_dir, "cor_panck.rds"))
 
 # cd45 self correlation
-cd45_cor_mat <- cd45_voom_lcpm
-rownames(cd45_cor_mat) <- paste0("cd45_", rownames(cd45_voom_lcpm))
+#cd45_cor_mat <- cd45_voom_lcpm
+#rownames(cd45_cor_mat) <- paste0("cd45_", rownames(cd45_voom_lcpm))
 # cd45_cor_res <- cor_compute(cd45_cor_mat, 
 #                             cd45_cor_mat, 
 #                             nperms)
 # saveRDS(cd45_cor_res, file=file.path(working_dir, "cor_cd45.rds"))
-cd45_cor_res <- readRDS(file.path(working_dir, "cor_cd45.rds"))
+#cd45_cor_res <- readRDS(file.path(working_dir, "cor_cd45.rds"))
 
 # sma self correlation
-sma_cor_mat <- sma_voom_lcpm
-rownames(sma_cor_mat) <- paste0("sma_", rownames(sma_voom_lcpm))
+#sma_cor_mat <- sma_voom_lcpm
+#rownames(sma_cor_mat) <- paste0("sma_", rownames(sma_voom_lcpm))
 # sma_cor_res <- cor_compute(sma_cor_mat, 
 #                            sma_cor_mat, 
 #                            nperms)
 # saveRDS(sma_cor_res, file=file.path(working_dir, "cor_sma.rds"))
-sma_cor_res <- readRDS(file.path(working_dir, "cor_sma.rds"))
-
-
+#sma_cor_res <- readRDS(file.path(working_dir, "cor_sma.rds"))
 
 #
 # construct network
 #
 # edges
-edges_all <- bind_rows(cor_result_to_edges(paired_panck_cd45$cor_result),
-                       cor_result_to_edges(paired_panck_sma$cor_result),
-                       cor_result_to_edges(panck_cor_res, self=TRUE),
-                       cor_result_to_edges(cd45_cor_res, self=TRUE),
-                       cor_result_to_edges(sma_cor_res, self=TRUE))
-
-# filter significant edges
-edges <- filter(edges_all, qval < cor_qval_cutoff,
-                cor >= cor_r_cutoff)
-edges$weight <- abs(edges$cor) ** cor_weight_beta
-# nodes
-nodes_panck <- bind_cols(label = rownames(panck_cor_mat),
-                         orig_gene = rownames(grade_voom_lcpm),
-                         type = "panck",
-                         grade_subtype = grade_de_merged$subtype,
-                         grade_log2fc = grade_de_merged$log2fc_path_hgd_vs_lgd)
-nodes_cd45 <- bind_cols(label = rownames(cd45_cor_mat),
-                        orig_gene = rownames(cd45_voom_lcpm),
-                        type = "cd45",
-                        grade_subtype = "cd45",
-                        grade_log2fc = 0)
-nodes_sma <- bind_cols(label = rownames(sma_cor_mat),
-                       orig_gene = rownames(sma_voom_lcpm),
-                       type = "sma",
-                       grade_subtype = "sma",
-                       grade_log2fc = 0)
-nodes <- bind_rows(nodes_panck, nodes_cd45, nodes_sma)
-nodes$id <- nodes$label
-# filter nodes
-nodes <- nodes %>% filter(id %in% union(edges$source, edges$target))
+# edges_all <- bind_rows(cor_result_to_edges(paired_panck_cd45$cor_result),
+#                        cor_result_to_edges(paired_panck_sma$cor_result),
+#                        cor_result_to_edges(panck_cor_res, self=TRUE),
+#                        cor_result_to_edges(cd45_cor_res, self=TRUE),
+#                        cor_result_to_edges(sma_cor_res, self=TRUE))
+# 
+# # filter significant edges
+# edges <- filter(edges_all, qval < cor_qval_cutoff,
+#                 cor >= cor_r_cutoff)
+# edges$weight <- abs(edges$cor) ** cor_weight_beta
+# # nodes
+# nodes_panck <- bind_cols(label = rownames(panck_cor_mat),
+#                          orig_gene = rownames(grade_voom_lcpm),
+#                          type = "panck",
+#                          grade_subtype = grade_de_merged$subtype,
+#                          grade_log2fc = grade_de_merged$log2fc_path_hgd_vs_lgd)
+# nodes_cd45 <- bind_cols(label = rownames(cd45_cor_mat),
+#                         orig_gene = rownames(cd45_voom_lcpm),
+#                         type = "cd45",
+#                         grade_subtype = "cd45",
+#                         grade_log2fc = 0)
+# nodes_sma <- bind_cols(label = rownames(sma_cor_mat),
+#                        orig_gene = rownames(sma_voom_lcpm),
+#                        type = "sma",
+#                        grade_subtype = "sma",
+#                        grade_log2fc = 0)
+# nodes <- bind_rows(nodes_panck, nodes_cd45, nodes_sma)
+# nodes$id <- nodes$label
+# # filter nodes
+# nodes <- nodes %>% filter(id %in% union(edges$source, edges$target))
 
 
 #
@@ -2215,7 +2156,7 @@ edges$weight <- abs(edges$cor) ** cor_weight_beta
 
 # nodes
 nodes <- bind_cols(label = rownames(panck_cor_mat),
-                   orig_gene = rownames(grade_voom_lcpm),
+                   orig_gene = rownames(norm_count_mat),
                    type = "panck",
                    grade_subtype = grade_de_merged$subtype,
                    grade_log2fc = grade_de_merged$log2fc_path_hgd_vs_lgd,
@@ -2260,7 +2201,7 @@ ggplot(res, aes(x=r, y=n)) +
 # clustering/community detection
 clust <- cluster_leiden(g,
                         objective_function="modularity",
-                        resolution=graph_clust_resolution,
+                        resolution=0.50,
                         n_iterations=1000)
 graph_clust_resolution
 modularity(g, membership(clust))
@@ -2297,12 +2238,12 @@ e <- filter(edges_all, qval < cor_qval_cutoff)
 merged_edges <- NULL
 for (i in 1:nclust) {
   ni <- clust_nodes %>% dplyr::filter(community == i) %>% dplyr::select(id) %>% dplyr::pull()
-  if (length(ni) < min_csize) {
+  if (length(ni) < graph_min_csize) {
     next
   }
   for (j in (i+1):nclust) {
     nj <- clust_nodes %>% dplyr::filter(community == j) %>% dplyr::select(id) %>% dplyr::pull()
-    if (length(nj) < min_csize) {
+    if (length(nj) < graph_min_csize) {
       next
     }
     eij <- bind_rows(e %>% filter(source %in% ni, target %in% nj),
@@ -2398,16 +2339,9 @@ for (i in 1:length(unique(clust_nodes$community))) {
 }
 
 yy
-edo2 <- gseDO(geneList)
 
-
-dotplot(edo, showCategory=30) + ggtitle("dotplot for ORA")
-dotplot(edo2, showCategory=30) + ggtitle("dotplot for GSEA")
-
-?enrichplot::dotplot
-
-
-enrichplot::dotplot(yy[[10]], showCategory = 3, font.size = 6)
+enrichplot::dotplot(yy[[1]])
+enrichplot::dotplot(yy[[1]], showCategory = 3, font.size = 6)
 
 
 str(yy)
@@ -3065,3 +2999,14 @@ x %>% filter(panck == "CD55", pval < 0.05) %>% arrange(cor) %>% as.data.frame()
 # #      layout=layout_with_kk,
 # #      vertex.size=2,
 # #      vertex.label=NA)
+
+
+##################################################
+#
+#
+# Volcano plots
+#
+#
+##################################################
+
+# TODO
