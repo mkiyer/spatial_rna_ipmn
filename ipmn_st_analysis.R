@@ -50,7 +50,7 @@ qc_min_counts = 50000
 qc_min_auc = 0.60
 qc_negprobe_lod_quantile = 0.9
 qc_min_negprobe_geomean = 1
-qc_min_frac_expr = 0.1
+qc_min_frac_expr = 0.25
 
 # de params
 de_norm_method = "RLE"
@@ -217,14 +217,18 @@ geomean <- function(x) {
 }
 
 merge_probes_to_genes <- function(x, sample_cols) {
-  x <- x  %>%
-    filter(CodeClass != "Negative") %>%
-    rename(entrez_id = GeneID) %>%
+  x <- x %>%
     group_by(entrez_id) %>%
     summarise(
+      gene_symbol = unique(gene_symbol),
+      nprobes = n(),
+      probe_ids = str_flatten(probe_id, collapse=","),
+      probe_type = min(probe_type),
+      frac_expr = mean(frac_expr),
+      frac_expr_min = min(frac_expr),
+      frac_expr_max = max(frac_expr),
       across(all_of(sample_cols), geomean)
     )
-  return(x)
 }
 
 calc_frac_expr <- function(m, bg_lod) {
@@ -244,22 +248,79 @@ background_subtract <- function(m, offset=0, min.count=1) {
   x
 }
 
-quantile_normalize <- function(x, cpm=TRUE, log=TRUE) {
-  xn <- x
-  if (cpm) {
-    xn <- sweep(xn * 1e6, 2, colSums(xn), "/")
-    xn <- apply(xn, 2, pmax, 1)
+# normalize_quantile <- function(x, cpm=TRUE, log=TRUE) {
+#   xn <- x
+#   num_counts <- colSums(x)
+#   if (cpm) {
+#     xn <- sweep(xn * 1e6, 2, num_counts, "/")
+#     xn <- apply(xn, 2, pmax, 1)
+#   }
+#   if (log) {
+#     xn <- log2(xn)
+#   }
+#   xn <- as.data.frame(normalizeQuantiles(as.matrix(xn), ties=FALSE))
+#   rownames(xn) <- rownames(x)
+#   colnames(xn) <- colnames(x)
+#   if (log) {
+#     xn <- 2**(xn)
+#   }
+#   if (cpm) {
+#     xn <- sweep(xn / 1e6, 2, num_counts, "*")
+#     xn <- apply(xn, 2, pmax, 1)
+#   }
+#   return(xn)
+# }
+
+# tocpm <- function(x, num_counts) {
+#   return(sweep(x * 1e6, 2, num_counts, "/"))
+# }
+# 
+# fromcpm <- function(x, num_counts) {
+#   return(sweep(x / 1e6, 2, num_counts, "*"))
+# }
+
+normalize_quantile <- function(x) {
+  # convert to cpm
+  num_counts <- colSums(x)
+  xcpm <- sweep(x * 1e6, 2, num_counts, "/")
+  
+  # use row sums as a tiebreaker for genes with equal counts
+  row_rank <- rank(rowSums(xcpm), ties.method="random")
+  row_ord <- apply(xcpm, 2, order, row_rank)
+  # rank matrix with ties broken by row sums
+  xrank <- apply(row_ord, 2, order)
+  
+  # now standard quantile norm (geomean)
+  xsort <- apply(xcpm, 2, sort)
+  xgeomean <- apply(xsort, 1, geomean)
+
+  index_to_value <- function(my_index, my_value){
+    return(my_value[my_index])
   }
-  if (log) {
-    xn <- log2(xn)
-  }
-  xn <- as.data.frame(preprocessCore::normalize.quantiles(as.matrix(xn)))
-  rownames(xn) <- rownames(x)
-  colnames(xn) <- colnames(x)
-  if (log) {
-    xn <- 2**(xn)
-  }
-  xn
+  
+  xnorm <- apply(xrank, 2, index_to_value, xgeomean)
+  return(xnorm)
+  # convert back to raw counts
+  #xraw <- sweep(xnorm / 1e6, 2, num_counts, "*")
+  #xraw <- apply(xraw, 2, pmax, 1)
+  #return(xraw)
+}
+
+get_bgsub_counts <- function(x, sample_meta) {
+  count_meta <- select(x, -all_of(sample_meta$aoi_id))
+  m <- select(x, all_of(sample_meta$aoi_id))
+  m <- background_subtract(m, sample_meta$negprobe_geomean)
+  m <- bind_cols(count_meta, m)
+  return(m)
+}
+
+get_bgsub_qnorm_cpm <- function(x, sample_meta) {
+  count_meta <- select(x, -all_of(sample_meta$aoi_id))
+  m <- select(x, all_of(sample_meta$aoi_id))
+  m <- background_subtract(m, sample_meta$negprobe_geomean)
+  m <- normalize_quantile(m)
+  m <- bind_cols(count_meta, m)
+  return(m)
 }
 
 
@@ -267,93 +328,22 @@ quantile_normalize <- function(x, cpm=TRUE, log=TRUE) {
 ipmn <- process_input(input_xlsx_file, 
                       negprobe_lod_quantile = qc_negprobe_lod_quantile)
 
-# restrict all downstream analysis to specified segments
-metadata <- filter(ipmn$metadata, segment %in% analysis_segments)
-counts_probe <- select(ipmn$counts,
-                       -all_of(ipmn$metadata$aoi_id),
-                       all_of(metadata$aoi_id))
-
-# merge multiple probes per gene to a single geometric mean per gene
-counts_gene <- merge_probes_to_genes(counts_probe, metadata$aoi_id)
-gene_symbols <- AnnotationDbi::mapIds(org.Hs.eg.db::org.Hs.eg.db, 
-                                      keys=as.character(counts_gene$entrez_id),
-                                      column="SYMBOL", 
-                                      keytype="ENTREZID", 
-                                      multiVals="first")
-counts_gene <- counts_gene %>% 
-  mutate(gene_symbol = gene_symbols, 
-         probe_type = "gene",
-         .after = "entrez_id")
-
-# keep negative probes for downstream qc analysis
-counts_negprobe <- counts_probe %>%
-  filter(CodeClass == "Negative") %>%
-  mutate(gene_symbol = paste0("GEOMX_CTA_NEGPROBE_", ProbeName),
-         probe_type = "negative",
-         frac_expr = 0.0) %>%
-  select(entrez_id = GeneID,
-         gene_symbol,
-         probe_type,
-         frac_expr,
-         all_of(metadata$aoi_id))
-
+#
+# samples 
+#
 # filter aois based on qc parameters
-metadata <- metadata %>%
+metadata <- ipmn$metadata %>% 
+  filter(segment %in% analysis_segments) %>%
   mutate(qcfail = (num_counts <= qc_min_counts | auc <= qc_min_auc | 
                      negprobe_geomean <= qc_min_negprobe_geomean))
-
-# filter aois
 fmetadata <- filter(metadata, !qcfail)
-# compute quantiles of important qc metrics
-fmetadata <- fmetadata %>%
-  mutate(negprobe_quant = factor(ntile(negprobe_geomean, 4)),
-         auc_quant = factor(ntile(auc, 4)),
-         count_quant = factor(ntile(num_counts, 4)))
 
-# filter count matrix
-counts_gene <- select(counts_gene,
-                      -all_of(metadata$aoi_id), 
-                      all_of(fmetadata$aoi_id))
-
-counts_negprobe <- select(counts_negprobe,
-                          -all_of(metadata$aoi_id), 
-                          all_of(fmetadata$aoi_id))
-
-# fraction of aois expressing each genes
-frac_expr <- calc_frac_expr(select(counts_gene, fmetadata$aoi_id), fmetadata$negprobe_lod)
-counts_gene <- mutate(counts_gene, frac_expr = frac_expr, .after = "probe_type")
-
-# filter genes with low expression
-fcounts_gene <- filter(counts_gene, frac_expr > qc_min_frac_expr)
-
-# background subtraction
-gene_meta <- select(fcounts_gene, -fmetadata$aoi_id)
-fcounts_gene_mat <- fcounts_gene %>%
-  select(gene_symbol, all_of(fmetadata$aoi_id)) %>%
-  column_to_rownames("gene_symbol")
-fcounts_bgsub_gene_mat <- background_subtract(fcounts_gene_mat, fmetadata$negprobe_geomean)
-
-# quantile normalization
-fcounts_qnorm_gene_mat <- round(quantile_normalize(fcounts_bgsub_gene_mat))
-
-# round to nearest count
-fcounts_gene_mat <- round(fcounts_gene_mat)
-fcounts_bgsub_gene_mat <- round(fcounts_bgsub_gene_mat)
-
-# write processed data
-write_xlsx(
-  list(unfiltered_metadata = metadata,
-       unfiltered_counts_probe = counts_probe,
-       counts_negprobe = counts_negprobe,
-       metadata = fmetadata,
-       gene_meta = gene_meta,
-       unfiltered_gene_counts = counts_gene,
-       gene_count_matrix = as_tibble(fcounts_gene_mat, rownames="gene_symbol"),
-       bgsub_gene_count_matrix = as_tibble(fcounts_bgsub_gene_mat, rownames="gene_symbol"),
-       qnorm_gene_count_matrix = as_tibble(fcounts_qnorm_gene_mat, rownames="gene_symbol")),
-  file.path(working_dir, processed_xlsx_file)
-)
-
+# filter aois in probe matrix
+counts_probe <- ipmn$counts %>%
+  select(-all_of(ipmn$metadata$aoi_id), all_of(fmetadata$aoi_id)) %>%
+  rename(probe_id = ProbeName,
+         entrez_id = GeneID) %>%
+  select(probe_id, probe_type, entrez_id, all_of(fmetadata$aoi_id))
 
 # setup samples
 samples <- fmetadata
@@ -372,6 +362,111 @@ table(samples$histpath)
 # color scales for plots
 color_scales <- get_color_scales(unique(samples$slide_id))
 
+
+#
+# count data
+# 
+# separate negative probes
+counts_negprobe <- counts_probe %>%
+  filter(probe_type == 0) %>%
+  mutate(entrez_id = 99990000 + as.integer(probe_id),
+         gene_symbol = paste0("GEOMX_CTA_NEGPROBE_", probe_id), 
+         .after = "entrez_id")
+counts_probe <- counts_probe %>%
+  filter(probe_type == 1)
+
+# annotate gene probes
+gene_symbols <- AnnotationDbi::mapIds(org.Hs.eg.db::org.Hs.eg.db, 
+                                      keys=as.character(counts_probe$entrez_id),
+                                      column="SYMBOL", 
+                                      keytype="ENTREZID", 
+                                      multiVals="first")
+counts_probe <- counts_probe %>% 
+  mutate(gene_symbol = gene_symbols,
+         .after = "entrez_id")
+
+# combine gene probes with negative probes
+counts_probe <- bind_rows(counts_probe, counts_negprobe)
+
+# fraction of aois expressing each genes
+frac_expr <- calc_frac_expr(select(counts_probe, samples$aoi_id), samples$negprobe_lod)
+counts_probe <- counts_probe %>%
+  mutate(frac_expr = frac_expr, .after = "gene_symbol") %>%
+  mutate(expressed = case_when(probe_type == 0 ~ "bg",
+                               frac_expr <= qc_min_frac_expr ~ "no",
+                               TRUE ~ "yes"))
+table(counts_probe$expressed)
+
+# filter probes with low expression
+fcounts_probe <- filter(counts_probe, (probe_type == 0) | (frac_expr > qc_min_frac_expr))
+
+#
+# normalized count matrices
+#
+#
+# bgsub qnorm normalization
+#
+probe_bgsub_qnorm_cpm <- get_bgsub_qnorm_cpm(fcounts_probe, samples)
+gene_bgsub_qnorm_cpm <- merge_probes_to_genes(probe_bgsub_qnorm_cpm, samples$aoi_id)
+
+# gene metadata
+gene_meta <- select(gene_bgsub_qnorm_cpm, -samples$aoi_id)
+nrow(gene_meta)
+
+# normalized count data
+gene_bgsub_qnorm_cpm <- select(gene_bgsub_qnorm_cpm, gene_symbol, all_of(samples$aoi_id)) %>%
+  column_to_rownames("gene_symbol")
+gene_bgsub_qnorm_dgelist <- DGEList(counts = gene_bgsub_qnorm_cpm,
+                                    samples = samples,
+                                    genes = gene_meta)
+gene_bgsub_qnorm_lcpm <- log2(gene_bgsub_qnorm_cpm)
+
+#
+# bgsub scale normalization
+#
+probe_bgsub_counts <- get_bgsub_counts(fcounts_probe, samples)
+gene_bgsub_counts <- merge_probes_to_genes(probe_bgsub_counts, samples$aoi_id)
+# exclude metadata
+gene_bgsub_counts <- select(gene_bgsub_counts, gene_symbol, all_of(samples$aoi_id)) %>%
+  column_to_rownames("gene_symbol")
+
+# voom
+y <- DGEList(counts = gene_bgsub_counts,
+             samples = samples,
+             genes = gene_meta)
+y <- calcNormFactors(y, method = de_norm_method)
+v <- voom(y, plot=TRUE)
+gene_bgsub_dgelist <- y
+gene_bgsub_voom <- v
+gene_bgsub_voom_lcpm <- v$E
+
+
+#
+# write processed data
+#
+write_xlsx(
+  list(unfiltered_metadata = metadata,
+       unfiltered_counts_probe = counts_probe,
+       unfiltered_counts_negprobe = counts_negprobe,
+       metadata = fmetadata,
+       gene_meta = gene_meta,
+       gene_bgsub_qnorm_lcpm = as_tibble(gene_bgsub_qnorm_lcpm, rownames="gene_symbol"),
+       gene_bgsub_voom_lcpm = as_tibble(gene_bgsub_voom_lcpm, rownames="gene_symbol")),
+  file.path(working_dir, processed_xlsx_file)
+)
+
+##################################################
+#
+# Matrix for downstream analysis
+#
+##################################################
+
+norm_count_dgelist <- gene_bgsub_qnorm_dgelist
+norm_count_lcpm <- gene_bgsub_qnorm_lcpm
+# norm_count_dgelist <- gene_bgsub_dgelist
+# norm_count_voom <- gene_bgsub_voom
+# norm_count_lcpm <- gene_bgsub_voom_lcpm
+
 ##################################################
 #
 # Quality Control Plots
@@ -383,7 +478,7 @@ summary(metadata$AOINucleiCount)
 summary(metadata$num_counts)
 summary(metadata$pct_expressed)
 table(metadata$qcfail, metadata$segment)
-table(counts_gene$frac_expr > qc_min_frac_expr)
+table(counts_probe$frac_expr > qc_min_frac_expr)
 
 # figure: AOINucleiCount versus num_counts
 x <- cor.test(metadata$AOINucleiCount, metadata$num_counts)
@@ -493,12 +588,13 @@ f <- file.path(plot_dir, "boxplot_path_vs_auc_byslide.pdf")
 ggsave(f, plot=p, device="pdf", width = 8, height = 4)
 
 # figure: gene filtering fraction expressed cutoff
-p <- ggplot(counts_gene, aes(x=frac_expr)) +
-  geom_histogram(binwidth=0.05, color="black", fill="grey") +
+p <- ggplot(filter(counts_probe, probe_type == 1), aes(x=frac_expr)) +
+  geom_histogram(binwidth=0.025, color="black", fill="grey") +
   geom_vline(xintercept = qc_min_frac_expr, linetype="dashed", color="red") +
   theme_minimal() +
   xlab("Fraction Expressed Above Background") +
-  ylab("# of Genes")
+  ylab("# of Probes") +
+  facet_wrap(~ probe_type)
 p
 f <- file.path(plot_dir, "histogram_frac_expr.pdf")
 ggsave(f, plot=p, device="pdf", width = 4, height = 4)
@@ -507,17 +603,13 @@ ggsave(f, plot=p, device="pdf", width = 4, height = 4)
 #
 # count ridge plots
 #
-counts_gene_neg <- bind_rows(counts_gene, counts_negprobe) %>% 
-  mutate(expressed = case_when(probe_type == "negative" ~ "bg",
-                               frac_expr <= qc_min_frac_expr ~ "no",
-                               TRUE ~ "yes"))
-
-# figure: ridge plot unnormalized counts (expressed bg/no/yes)
-x <- counts_gene_neg
-y <- select(fmetadata, aoi_id, slide_id, segment, hgd_histology, path, count_quant, auc_quant)
+x <- counts_probe
+y <- select(fmetadata, aoi_id, slide_id, segment, histology, histpath, path)
 x <- x %>%
   pivot_longer(fmetadata$aoi_id, names_to="aoi_id", values_to="count") %>%
   inner_join(y, by=c("aoi_id"="aoi_id"))
+
+# figure: ridge plot unnormalized counts (expressed bg/no/yes)
 p <- x %>%
   ggplot(aes(x=count, y=factor(aoi_id), fill=factor(expressed))) +
   stat_density_ridges(alpha=0.7, scale=10, rel_min_height=0.001, quantile_lines=TRUE) + 
@@ -531,42 +623,80 @@ p
 f <- file.path(plot_dir, "ridge_plot_rawcounts_by_aoi.pdf")
 ggsave(f, plot=p, device="pdf", width = 8, height = 8)
 
-
+#
 # normalized count ridge plots
-x <- counts_gene_neg %>% 
-  select(gene_symbol, all_of(fmetadata$aoi_id)) %>%
-  column_to_rownames("gene_symbol")
-x <- round(background_subtract(x, fmetadata$negprobe_geomean))
-x <- DGEList(counts = x)
-x <- calcNormFactors(x, method=de_norm_method)
-x <- cpm(x, log=TRUE, prior.count=0)
-x <- as_tibble(x, rownames="gene_symbol")
-x$probe_type <- counts_gene_neg$probe_type
-x$expressed <- counts_gene_neg$expressed
-y <- select(fmetadata, aoi_id, slide_id, segment, hgd_histology, path, count_quant, auc_quant)
+#
+
+# qnorm
+x <- get_bgsub_qnorm_cpm(counts_probe, samples)
+x <- DGEList(counts = log2(select(x, samples$aoi_id)), 
+             samples = samples, 
+             genes = select(x, -samples$aoi_id))
+x <- bind_cols(x$genes, x$counts)
+y <- select(samples, aoi_id, slide_id, segment, histology, path)
 x <- x %>%
-  pivot_longer(fmetadata$aoi_id, names_to="aoi_id", values_to="count") %>%
+  pivot_longer(samples$aoi_id, names_to="aoi_id", values_to="count") %>%
   inner_join(y, by=c("aoi_id"="aoi_id"))
 
-# by slide
+# scale
+# x <- get_bgsub_counts(counts_probe, samples)
+# x <- DGEList(counts = select(x, samples$aoi_id), 
+#              samples = samples, 
+#              genes = select(x, -samples$aoi_id))
+# x <- calcNormFactors(x, method = de_norm_method)
+# v <- voom(x)
+# x <- bind_cols(x$genes, v$E)
+# y <- select(samples, aoi_id, slide_id, segment, histology, path)
+# x <- x %>%
+#   pivot_longer(samples$aoi_id, names_to="aoi_id", values_to="count") %>%
+#   inner_join(y, by=c("aoi_id"="aoi_id"))
+
+# by aoi
 p <- x %>%
-  ggplot(aes(x=count, y=factor(slide_id), fill=factor(expressed))) +
-  stat_density_ridges(alpha=0.7, scale=2, rel_min_height=0.001, quantile_lines=TRUE) + 
-  xlab("Counts per million reads (CPM)") +
+  ggplot(aes(x=count, y=factor(aoi_id), fill=factor(expressed))) +
+  stat_density_ridges(alpha=0.7, scale=10, rel_min_height=0.001, quantile_lines=TRUE) + 
+  xlab("log2(Counts per million reads)") +
   ylab("Slides") +
   labs(fill = "Expressed") +
   theme_ridges() + 
   theme(axis.text = element_text(size=5))
 p
-f <- file.path(plot_dir, "ridge_plot_cpm_by_slide.pdf")
+f <- file.path(plot_dir, "ridge_plot_unfiltered_probes_by_aoi.pdf")
+ggsave(f, plot=p, device="pdf", width = 8, height = 8)
+
+# by path
+p <- x %>%
+  ggplot(aes(x=count, y=factor(path), fill=factor(expressed))) +
+  stat_density_ridges(alpha=0.7, scale=10, rel_min_height=0.001, quantile_lines=TRUE) + 
+  xlab("log2(Counts per million reads)") +
+  ylab("Slides") +
+  labs(fill = "Expressed") +
+  theme_ridges() + 
+  theme(axis.text = element_text(size=5))
+p
+f <- file.path(plot_dir, "ridge_plot_unfiltered_probes_by_path.pdf")
+ggsave(f, plot=p, device="pdf", width = 8, height = 8)
+
+# by histology
+p <- x %>%
+  ggplot(aes(x=count, y=factor(histology), fill=factor(expressed))) +
+  stat_density_ridges(alpha=0.7, scale=10, rel_min_height=0.001, quantile_lines=TRUE) + 
+  xlab("log2(Counts per million reads)") +
+  ylab("Slides") +
+  labs(fill = "Expressed") +
+  theme_ridges() + 
+  theme(axis.text = element_text(size=5))
+p
+f <- file.path(plot_dir, "ridge_plot_unfiltered_probes_by_histology.pdf")
 ggsave(f, plot=p, device="pdf", width = 8, height = 8)
 
 
-# filtered gene ridge plots
-x <- DGEList(counts = fcounts_bgsub_gene_mat)
-x <- calcNormFactors(x, method = de_norm_method)
-x <- cpm(x, log=TRUE, prior.count=0)
-x <- as_tibble(x, rownames="gene_symbol")
+
+#
+# filtered normalized gene ridge plots
+#
+x <- norm_count_lcpm
+x <- as_tibble(x, rownames("gene_symbol"))
 y <- select(fmetadata, aoi_id, slide_id, segment, histology, path, histpath)
 x <- x %>%
   pivot_longer(fmetadata$aoi_id, names_to="aoi_id", values_to="count") %>%
@@ -597,7 +727,6 @@ p <- filter(x, segment == "panck") %>%
 p
 f <- file.path(plot_dir, "ridge_plot_log2cpm_by_path.pdf")
 ggsave(f, plot=p, device="pdf", width = 4, height = 4)
-
 
 p <- filter(x, segment == "panck") %>%
   ggplot(aes(x=count, y=histology, fill=histology)) +
@@ -649,26 +778,13 @@ run_pca <- function(x, meta) {
   return(list(pr = pr, tbl=pca_tbl))
 }
 
-normalize_voom <- function(m, s, g, norm_method) {
-  y <- DGEList(counts = m, samples = s, genes = g)
-  y <- calcNormFactors(y, method = norm_method)
-  v <- voom(y, plot=TRUE)
-  return(v$E)
-}
-
 # quantile normalization
-y <- DGEList(counts=fcounts_qnorm_gene_mat,
-             samples=samples,
-             genes=gene_meta)
-qnorm_bgsub_lcpm <- as_tibble(cpm(y, log=TRUE, prior.count = 0), rownames="gene_symbol") %>%
-  column_to_rownames("gene_symbol")
-# voom normalization
-# voom_bgsub_lcpm <- normalize_voom(fcounts_bgsub_gene_mat, samples, gene_meta, de_norm_method)
-pca_res <- run_pca(qnorm_bgsub_lcpm, samples)
+y <- norm_count_lcpm
+pca_res <- run_pca(y, samples)
 pca_tbl <- pca_res$tbl
-tsne_res <- run_tsne(qnorm_bgsub_lcpm, samples, perp=11)
+tsne_res <- run_tsne(y, samples, perp=11)
 tsne_tbl <- tsne_res$tbl
-# write_xlsx(tsne_tbl, file.path(working_dir, tsne_results_xlsx_file))
+write_xlsx(tsne_tbl, file.path(working_dir, tsne_results_xlsx_file))
 tsne_tbl <- read_xlsx(file.path(working_dir, tsne_results_xlsx_file), sheet = "Sheet1")
 
 # pca
@@ -743,22 +859,12 @@ saveDEResults <- function(file_prefix, res, file_path=NULL) {
   write(de, file=file.path(file_path, paste0(file_prefix, "_de_genes.txt")), sep="\n")
 }
 
-limmaTrend <- function(y, design, contrasts) {
-  # limma trend de analysis
-  lcpm <- log2(y$counts)
-  fit <- lmFit(lcpm, design)
-  fit <- contrasts.fit(fit, contrasts)
-  fit <- eBayes(fit, trend=TRUE)
-  return(list(fit=fit))
-}
 
-limmaVoom <- function(y, design, contrasts) {
-  # limma voom de analysis
-  v <- voom(y, design, plot=TRUE)
-  fit <- lmFit(v, design)
+limmaRun <- function(y, design, contrasts, trend=FALSE) {
+  fit <- lmFit(y, design)
   fit <- contrasts.fit(fit, contrasts)
-  fit <- eBayes(fit)
-  return(list(voom=v$E, fit=fit))
+  fit <- eBayes(fit, trend=trend)
+  return(list(fit=fit)) 
 }
 
 limmaRenameResults <- function(res) {
@@ -797,34 +903,17 @@ contrasts = makeContrasts(hist_pb_vs_gf = pb - gf,
                           hist_int = intestinal - (pb + gf)/2,
                           levels=design)
 
-# limma trend with quantile normalization
-method <- "limma_trend_bgsub_qn"
-y <- DGEList(counts=fcounts_bgsub_gene_mat,
-             samples=samples,
-             group=samples$histology,
-             genes=gene_meta)
-y <- calcNormFactors(y, method="TMM")
-# y <- DGEList(counts=fcounts_qnorm_gene_mat,
-#              samples=samples,
-#              group=samples$histology,
-#              genes=gene_meta)
-x <- limmaTrend(y, design, contrasts)
+# qnorm
+method <- "limma_trend_qnorm"
+x <- limmaRun(gene_bgsub_qnorm_lcpm, design, contrasts, trend=TRUE)
 res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
 hist_de <- res
-hist_qnorm_lcpm <- as_tibble(cpm(y, log=TRUE, prior.count = 0), rownames="gene_symbol") %>%
-  column_to_rownames("gene_symbol")
 
-# voom with scale normalization
-# method <- "limma_voom_bgsub_q3"
-# y <- DGEList(counts=fcounts_bgsub_gene_mat,
-#              samples=samples,
-#              group=samples$histology,
-#              genes=gene_meta)
-# y <- calcNormFactors(y, method=de_norm_method)
-# x <- limmaVoom(y, design, contrasts)
+# # scale (voom)
+# method <- "limma_voom"
+# x <- limmaRun(gene_bgsub_voom, design, contrasts)
 # res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
-# hist_voom_lcpm <- as_tibble(x$voom, rownames="gene_symbol") %>%
-#   column_to_rownames("gene_symbol")
+# hist_de <- res
 
 # merged de analyses
 hist_de_merged <- select(hist_de, gene, analysis, avgexpr, log2fc, padj, de) %>%
@@ -838,17 +927,14 @@ hist_de_merged <- hist_de_merged %>%
                              de_hist_pb_vs_gf == "up" & de_hist_int_vs_gf == "up" ~ "pbint",
                              de_hist_pb_vs_gf == "dn" & de_hist_int_vs_gf == "up" ~ "intgf",
                              TRUE ~ "none"))
-
-
-hist_de_merged %>% filter(gene == "CLU") %>% as.data.frame()
 table(hist_de_merged$subtype)
+hist_de_merged %>% filter(gene == "SMAD4") %>% as.data.frame()
 
 # write results
 write_xlsx(list(samples = samples,
                 gene_meta = gene_meta,
                 de = hist_de,
-                merged_de = hist_de_merged,
-                norm_lcpm = hist_qnorm_lcpm),
+                merged_de = hist_de_merged),
            file.path(working_dir, de_results_hist_xlsx))
 
 #
@@ -868,18 +954,22 @@ contrasts = makeContrasts(path_hgd_vs_lgd = (panck_pbhgd + panck_inthgd)/2 - (pa
                           path_pbhgd_vs_inthgd = panck_pbhgd - panck_inthgd,
                           levels=design)
 
+
 # limma trend with quantile normalization
-method <- "limma_trend_bgsub_qn"
-y <- DGEList(counts=fcounts_qnorm_gene_mat,
+method <- "limma_trend_qnorm"
+y <- DGEList(counts=counts_gene_qnorm_cpm,
              samples=samples,
-             group=samples$histpath,
              genes=gene_meta)
 x <- limmaTrend(y, design, contrasts)
 res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
 grade_de <- res
-grade_qnorm_lcpm <- as_tibble(cpm(y, log=TRUE, prior.count = 0), rownames="gene_symbol") %>%
-  column_to_rownames("gene_symbol")
 
+# limma voom with scale normalization
+# method <- "limma_voom_bgsub"
+# x <- limmaVoom(counts_gene_dgelist, design, contrasts)
+# res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
+# grade_de <- res
+#
 # voom with scale normalization
 # method <- "limma_voom_bgsub_q3"
 # y <- DGEList(counts=fcounts_bgsub_gene_mat,
@@ -906,13 +996,13 @@ grade_de_merged <- grade_de_merged %>%
                              de_path_pbhgd_vs_pblgd == "dn" ~ "pblgd",
                              de_path_inthgd_vs_intlgd == "dn" ~ "intlgd",
                              TRUE ~ "none"))
+table(grade_de_merged$subtype)
 
 # write gene expression data
 write_xlsx(list(samples = samples,
                 gene_meta = gene_meta,
                 de = grade_de,
-                merged_de = grade_de_merged,
-                norm_lcpm = grade_qnorm_lcpm),
+                merged_de = grade_de_merged),
            file.path(working_dir, de_results_grade_xlsx))
 
 ##################################################
@@ -1068,7 +1158,11 @@ gene_annot <- gene_meta %>%
 #
 # union of subtype specific genes
 hist_genes <- filter(hist_de_merged, subtype != "none") %>% select(gene) %>% pull()
-x <- hist_qnorm_lcpm[hist_genes,]
+
+x <- gene_bgsub_voom_lcpm[hist_genes,]
+x <- counts_gene_scale_voom[hist_genes,]
+# x <- counts_gene_qnorm_lcpm[hist_genes,]
+nrow(x)
 
 annot_row <- get_row_annot(hist_genes, gene_annot)
 annot_col <- column_to_rownames(samples, "aoi_id") %>% 
@@ -1088,7 +1182,9 @@ save_pheatmap_pdf(p, filename=f, width=10, height=h)
 table(grade_de_merged$subtype)
 grade_genes <- filter(grade_de_merged, de_path_hgd_vs_lgd != "no") %>% select(gene) %>% pull()
 grade_genes <- filter(grade_de_merged, subtype != "none") %>% select(gene) %>% pull()
-x <- grade_qnorm_lcpm[grade_genes,]
+#x <- counts_gene_qnorm_lcpm[grade_genes,]
+x <- counts_gene_scale_voom[grade_genes,]
+nrow(x)
 
 annot_row <- get_row_annot(grade_genes, gene_annot)
 annot_col <- column_to_rownames(samples, "aoi_id") %>% 
@@ -1330,29 +1426,28 @@ plot_grade_boxplot <- function(s, m, gene_symbol) {
 }
 
 
+# matrix for plotting
+x <- counts_gene_qnorm_lcpm
+
 # plot all de genes in heatmaps
 for (g in union(hist_genes, grade_genes)) {
-  p <- plot_hist_boxplot(samples, hist_qnorm_lcpm, g)
+  p <- plot_hist_boxplot(samples, x, g)
   f <- file.path(gene_plot_dir, paste0("boxplot_", g, "_hist.pdf"))
   ggsave(f, p, width=5, height=5)
-  p <- plot_grade_boxplot(samples, grade_qnorm_lcpm, g)
+  p <- plot_grade_boxplot(samples, x, g)
   f <- file.path(gene_plot_dir, paste0("boxplot_", g, "_grade.pdf"))
   ggsave(f, p, width=5, height=5)
 }
 
 # manually plot individual genes
-p <- plot_hist_boxplot(samples, hist_qnorm_lcpm, "MUC1")
+p <- plot_hist_boxplot(samples, x, "MUC1")
 ggsave(file.path(plot_dir, "hist_boxplot_muc1.pdf"), p, width=3, height=5)
-p <- plot_hist_boxplot(samples, hist_qnorm_lcpm, "MUC4")
+p <- plot_hist_boxplot(samples, x, "MUC4")
 ggsave(file.path(plot_dir, "hist_boxplot_muc4.pdf"), p, width=3, height=5)
-p <- plot_hist_boxplot(samples, hist_qnorm_lcpm, "CLU")
+p <- plot_hist_boxplot(samples, x, "CLU")
 ggsave(file.path(plot_dir, "hist_boxplot_clu.pdf"), p, width=3, height=5)
-p <- plot_hist_boxplot(samples, hist_qnorm_lcpm, "RBP4")
+p <- plot_hist_boxplot(samples, x, "RBP4")
 ggsave(file.path(plot_dir, "hist_boxplot_rbp4.pdf"), p, width=3, height=5)
-
-
-# matrix for plotting
-x <- qnorm_bgsub_lcpm
 
 # lymphocyte marker
 plot_grade_boxplot(samples, x, "PTPRC")
@@ -1392,6 +1487,15 @@ plot_grade_boxplot(samples, x, "TOP2A")
 plot_grade_boxplot(samples, x, "CENPF")
 plot_grade_boxplot(samples, x, "UBE2C")
 
+plot_grade_boxplot(samples, x, "LAMC2")
+plot_grade_boxplot(samples, x, "LIF")
+plot_grade_boxplot(samples, x, "CXCL5")
+plot_grade_boxplot(samples, x, "CLU")
+plot_grade_boxplot(samples, x, "RBP4")
+plot_grade_boxplot(samples, x, "SMAD4")
+
+grade_de_merged %>% filter(gene == "SMAD4") %>% as.data.frame()
+hist_de_merged %>% filter(gene == "SMAD4") %>% as.data.frame()
 
 ##################################################
 #
@@ -1597,7 +1701,6 @@ p <- ggplot(x, aes(x=NES, y=-log10(padj), color=analysis)) +
   geom_point(data=subset(x, padj > padj_cutoff), size=1, alpha=0.4) + 
   geom_point(data=subset(x, padj <= padj_cutoff), size=2, alpha=0.8) +
   geom_text_repel(data=subset(x, padj <= padj_cutoff), color="black", size=3, aes(label=abbrev), max.overlaps=Inf) +
-  scale_color_manual(values = color_scale) +
   ylab("-log10(adjusted p-value)") +
   xlab("NES") +
   ggtitle("GOBP Gene Sets") +
@@ -2058,7 +2161,7 @@ cor_result_to_edges <- function(cor_result, self=FALSE) {
 #
 # correlation analysis
 #
-norm_count_mat <- grade_qnorm_lcpm
+norm_count_mat <- counts_gene_qnorm_lcpm
 nperms <- 10000
 cor_qval_cutoff <- 0.01
 cor_r_cutoff <- 0.6
@@ -2081,11 +2184,12 @@ graph_clust_resolution <- 0.25
 #paired_panck_sma$cor_result <- readRDS(file.path(working_dir, "cor_panck_sma.rds"))
 
 # panck self correlation
+panck_cor_mat <- norm_count_mat
 rownames(panck_cor_mat) <- paste0("panck_", rownames(norm_count_mat))
-# panck_cor_res <- cor_compute(panck_cor_mat,
-#                              panck_cor_mat,
-#                              nperms)
-# saveRDS(panck_cor_res, file=file.path(working_dir, "cor_panck.rds"))
+panck_cor_res <- cor_compute(panck_cor_mat,
+                             panck_cor_mat,
+                             nperms)
+saveRDS(panck_cor_res, file=file.path(working_dir, "cor_panck.rds"))
 panck_cor_res <- readRDS(file.path(working_dir, "cor_panck.rds"))
 
 # cd45 self correlation
@@ -3009,4 +3113,41 @@ x %>% filter(panck == "CD55", pval < 0.05) %>% arrange(cor) %>% as.data.frame()
 #
 ##################################################
 
-# TODO
+# # TODO
+# 
+# 
+# 
+# x <- matrix(c(1, 3, 1, 2, 1, 3, 1, 50, 40, 10, 20, 50, 30, 10, 21, 1, 2, 2, 3, 4, 6, 1, 2, 80, 60, 50, 100, 200), ncol=4)
+# x
+# xcpm <- sweep(x * 100, 2, colSums(x), "/")
+# xcpm
+# 
+# normalize_quantile_global(xcpm)
+# normalizeQuantiles(xcpm, ties=FALSE)
+# 
+# rowSums(xcpm)
+# globalrank <- rank(rowSums(xcpm), ties.method="min")
+# globalrank
+# 
+# xrank <- apply(xcpm, 2, rank, ties.method="min")
+# xrank
+# globalrank
+# 
+# ord <- apply(xcpm, 2, order, globalrank)
+# xrank <- apply(ord, 2, order)
+# 
+# xsort <- apply(x, 2, sort)
+# xsort
+# xmean <- apply(xsort, 1, mean)
+# xmean
+# 
+# 
+# 
+# 
+# xcpm <- apply(xcpm, 2, pmax, 1)
+# normalizeQuantiles(x, ties=FALSE)
+# rank(rowSums(x))
+# 
+# preprocessCore::normalize.quantiles(x)
+# normalizeQuantiles(x, ties=FALSE)
+# xn <- as.data.frame(normalizeQuantiles(as.matrix(xn), ties=FALSE))
