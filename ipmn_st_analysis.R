@@ -47,7 +47,7 @@ analysis_segments = c("panck")
 
 # qc filtering parameters
 qc_min_counts = 50000
-qc_min_auc = 0.60
+qc_min_auc = 0.6
 qc_negprobe_lod_quantile = 0.9
 qc_min_negprobe_geomean = 1
 qc_min_frac_expr = 0.25
@@ -248,37 +248,6 @@ background_subtract <- function(m, offset=0, min.count=1) {
   x
 }
 
-# normalize_quantile <- function(x, cpm=TRUE, log=TRUE) {
-#   xn <- x
-#   num_counts <- colSums(x)
-#   if (cpm) {
-#     xn <- sweep(xn * 1e6, 2, num_counts, "/")
-#     xn <- apply(xn, 2, pmax, 1)
-#   }
-#   if (log) {
-#     xn <- log2(xn)
-#   }
-#   xn <- as.data.frame(normalizeQuantiles(as.matrix(xn), ties=FALSE))
-#   rownames(xn) <- rownames(x)
-#   colnames(xn) <- colnames(x)
-#   if (log) {
-#     xn <- 2**(xn)
-#   }
-#   if (cpm) {
-#     xn <- sweep(xn / 1e6, 2, num_counts, "*")
-#     xn <- apply(xn, 2, pmax, 1)
-#   }
-#   return(xn)
-# }
-
-# tocpm <- function(x, num_counts) {
-#   return(sweep(x * 1e6, 2, num_counts, "/"))
-# }
-# 
-# fromcpm <- function(x, num_counts) {
-#   return(sweep(x / 1e6, 2, num_counts, "*"))
-# }
-
 normalize_quantile <- function(x) {
   # convert to cpm
   num_counts <- colSums(x)
@@ -398,7 +367,8 @@ counts_probe <- counts_probe %>%
 table(counts_probe$expressed)
 
 # filter probes with low expression
-fcounts_probe <- filter(counts_probe, (probe_type == 0) | (frac_expr > qc_min_frac_expr))
+# fcounts_probe <- filter(counts_probe, (probe_type == 0) | (frac_expr > qc_min_frac_expr))
+fcounts_probe <- filter(counts_probe, probe_type == 1, frac_expr > qc_min_frac_expr)
 
 #
 # normalized count matrices
@@ -626,7 +596,6 @@ ggsave(f, plot=p, device="pdf", width = 8, height = 8)
 #
 # normalized count ridge plots
 #
-
 # qnorm
 x <- get_bgsub_qnorm_cpm(counts_probe, samples)
 x <- DGEList(counts = log2(select(x, samples$aoi_id)), 
@@ -689,7 +658,6 @@ p <- x %>%
 p
 f <- file.path(plot_dir, "ridge_plot_unfiltered_probes_by_histology.pdf")
 ggsave(f, plot=p, device="pdf", width = 8, height = 8)
-
 
 
 #
@@ -785,7 +753,7 @@ pca_tbl <- pca_res$tbl
 tsne_res <- run_tsne(y, samples, perp=11)
 tsne_tbl <- tsne_res$tbl
 write_xlsx(tsne_tbl, file.path(working_dir, tsne_results_xlsx_file))
-tsne_tbl <- read_xlsx(file.path(working_dir, tsne_results_xlsx_file), sheet = "Sheet1")
+#tsne_tbl <- read_xlsx(file.path(working_dir, tsne_results_xlsx_file), sheet = "Sheet1")
 
 # pca
 pr <- pca_res$pr
@@ -928,7 +896,6 @@ hist_de_merged <- hist_de_merged %>%
                              de_hist_pb_vs_gf == "dn" & de_hist_int_vs_gf == "up" ~ "intgf",
                              TRUE ~ "none"))
 table(hist_de_merged$subtype)
-hist_de_merged %>% filter(gene == "SMAD4") %>% as.data.frame()
 
 # write results
 write_xlsx(list(samples = samples,
@@ -954,35 +921,17 @@ contrasts = makeContrasts(path_hgd_vs_lgd = (panck_pbhgd + panck_inthgd)/2 - (pa
                           path_pbhgd_vs_inthgd = panck_pbhgd - panck_inthgd,
                           levels=design)
 
-
-# limma trend with quantile normalization
+# qnorm
 method <- "limma_trend_qnorm"
-y <- DGEList(counts=counts_gene_qnorm_cpm,
-             samples=samples,
-             genes=gene_meta)
-x <- limmaTrend(y, design, contrasts)
+x <- limmaRun(gene_bgsub_qnorm_lcpm, design, contrasts, trend=TRUE)
 res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
 grade_de <- res
 
-# limma voom with scale normalization
-# method <- "limma_voom_bgsub"
-# x <- limmaVoom(counts_gene_dgelist, design, contrasts)
+# # scale (voom)
+# method <- "limma_voom"
+# x <- limmaRun(gene_bgsub_voom, design, contrasts)
 # res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
 # grade_de <- res
-#
-# voom with scale normalization
-# method <- "limma_voom_bgsub_q3"
-# y <- DGEList(counts=fcounts_bgsub_gene_mat,
-#              samples=samples,
-#              group=samples$histpath,
-#              genes=gene_meta)
-# y <- calcNormFactors(y, method=de_norm_method)
-# x <- limmaVoom(y, design, contrasts)
-# res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
-# grade_de <- res
-# grade_voom_lcpm <- as_tibble(x$voom, rownames="gene_symbol") %>%
-#   column_to_rownames("gene_symbol")
-# grade_cpm <- cpm(y)
 
 # merged de analyses
 grade_de_merged <- select(grade_de, gene, analysis, avgexpr, log2fc, padj, de) %>%
@@ -1158,10 +1107,7 @@ gene_annot <- gene_meta %>%
 #
 # union of subtype specific genes
 hist_genes <- filter(hist_de_merged, subtype != "none") %>% select(gene) %>% pull()
-
-x <- gene_bgsub_voom_lcpm[hist_genes,]
-x <- counts_gene_scale_voom[hist_genes,]
-# x <- counts_gene_qnorm_lcpm[hist_genes,]
+x <- norm_count_lcpm[hist_genes,]
 nrow(x)
 
 annot_row <- get_row_annot(hist_genes, gene_annot)
@@ -1180,10 +1126,9 @@ save_pheatmap_pdf(p, filename=f, width=10, height=h)
 #
 # union of subtype hgd genes
 table(grade_de_merged$subtype)
-grade_genes <- filter(grade_de_merged, de_path_hgd_vs_lgd != "no") %>% select(gene) %>% pull()
+#grade_genes <- filter(grade_de_merged, de_path_hgd_vs_lgd != "no") %>% select(gene) %>% pull()
 grade_genes <- filter(grade_de_merged, subtype != "none") %>% select(gene) %>% pull()
-#x <- counts_gene_qnorm_lcpm[grade_genes,]
-x <- counts_gene_scale_voom[grade_genes,]
+x <- norm_count_lcpm[grade_genes,]
 nrow(x)
 
 annot_row <- get_row_annot(grade_genes, gene_annot)
@@ -1314,7 +1259,6 @@ p <- ggplot(x, aes(x=log2fc_path_pbhgd_vs_pblgd,
   ylab("log2(Fold Change) INT-HGD vs INT-LGD") +
   labs(color = "Pathology")
 p
-
 f <- file.path(plot_dir, "scatter_de_grade.pdf")
 ggsave(f, plot=p, device="pdf", width=8, height=8)
 
@@ -1427,7 +1371,7 @@ plot_grade_boxplot <- function(s, m, gene_symbol) {
 
 
 # matrix for plotting
-x <- counts_gene_qnorm_lcpm
+x <- norm_count_lcpm
 
 # plot all de genes in heatmaps
 for (g in union(hist_genes, grade_genes)) {
@@ -1716,8 +1660,9 @@ ggsave(file.path(plot_dir, "gsea_gobp_volcano.pdf"), plot=p, width=10, height=10
 # GSEA Leading Edge
 #
 # merge de analyses
-gsea_merged <- bind_rows(gsea_hallmark, gsea_gobp)
-# gsea_merged <- gsea_hallmark
+# gsea_merged <- bind_rows(gsea_hallmark, gsea_gobp)
+gsea_merged <- gsea_hallmark
+#gsea_merged <- gsea_gobp
 
 # perform leading edge analysis of top concepts
 analyses <- c("path_hgd_vs_lgd")
@@ -1793,8 +1738,8 @@ p <- pheatmap(m,
               cellwidth = 6,
               cellheight = 6,
               border_color = "black",
-              cluster_rows = FALSE,
-              cluster_cols = FALSE,
+              cluster_rows = TRUE,
+              cluster_cols = TRUE,
               clustering_distance_rows = "euclidean",
               clustering_distance_cols = "euclidean",
               clustering_method = "ward.D2",
@@ -1805,54 +1750,6 @@ p <- pheatmap(m,
 h <- 2 + nrow(m) / 6
 w <- 2 + ncol(m) / 2
 save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge.pdf"), width=w, height=h)
-
-
-#
-# GSEA Heatmap Plots
-#
-# x <- gsea_hallmark
-# sig_cutoff <- 0.01
-# sig_pathways <- filter(x, padj < sig_cutoff) %>% select(pathway) %>% distinct() %>% pull()
-# x <- x %>%
-#   filter(pathway %in% sig_pathways) %>%
-#   mutate(sig_nes = ifelse(padj < 0.05, NES, 0)) %>%
-#   # mutate(sig_nes = NES) %>%
-#   select(pathway, sig_nes, analysis) %>%
-#   pivot_wider(names_from = analysis, values_from = sig_nes)
-# x <- column_to_rownames(x, "pathway")
-# 
-# brks <- c(seq(-2.5, -1.25, length.out=25), 0, seq(1.25, 2.5, length.out=25))
-# p <- pheatmap(x, 
-#               scale = "none",
-#               color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
-#               breaks = brks,
-#               border_color = "black",
-#               cluster_rows = TRUE,
-#               cluster_cols = TRUE,
-#               fontsize_col = 6,
-#               fontsize_row = 6)
-# 
-# x <- gsea_gobp
-# sig_cutoff <- 0.01
-# sig_pathways <- filter(x, padj < sig_cutoff) %>% select(pathway) %>% distinct() %>% pull()
-# x <- x %>%
-#   filter(pathway %in% sig_pathways) %>%
-#   # mutate(sig_nes = ifelse(padj < 0.05, NES, 0)) %>%
-#   mutate(sig_nes = NES) %>%
-#   select(pathway, sig_nes, analysis) %>%
-#   pivot_wider(names_from = analysis, values_from = sig_nes)
-# x <- column_to_rownames(x, "pathway")
-# 
-# brks <- c(seq(-2.5, -1.25, length.out=25), 0, seq(1.25, 2.5, length.out=25))
-# p <- pheatmap(x, 
-#               scale = "none",
-#               color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
-#               breaks = brks,
-#               border_color = "black",
-#               cluster_rows = TRUE,
-#               cluster_cols = TRUE,
-#               fontsize_col = 6,
-#               fontsize_row = 6)
 
 
 #########################################################
@@ -1915,14 +1812,12 @@ write_xlsx(list(gsea = x),
 #   theme_minimal()
 # p
 
+
 #############################################################
 #
 # Cluster Labels
 #
 #############################################################
-
-
-
 
 g <- filter(grade_de_merged, de_path_pbhgd_vs_pblgd != "no") %>% select(gene) %>% pull()
 length(g)
@@ -2039,9 +1934,34 @@ colnames(grade_de_merged)
 
 #############################################################
 #
-# PanCK / CD45 / SMA correlation analysis
+# correlation analysis
 #
 #############################################################
+
+cor_compute2 <- function(x, y, cor_method = "spearman") {
+  # setup
+  ngenes_x <- nrow(x)
+  ngenes_y <- nrow(y)
+  nsamples <- ncol(x)
+  r <- array(data = 0, dim = c(ngenes_x, ngenes_y), dimnames = list(rownames(x), rownames(y)))
+  pvals <- array(data = 0, dim = c(ngenes_x, ngenes_y), dimnames = list(rownames(x), rownames(y)))
+
+  for (i in 1:ngenes_x) {
+    for (j in 1:ngenes_y) {
+      res <- cor.test(x=unlist(x[i,]), y=unlist(y[j,]), 
+                      alternative="two.sided",
+                      method="spearman")
+      r[i,j] <- res$estimate
+      pvals[i,j] <- res$p.value
+    }
+    if (i %% 100 == 0) {
+      print(i)
+      flush.console()
+    }
+  }
+  return(list(r = r, pvals = pvals))
+}
+
 
 cor_compute <- function(x, y, nperms, cor_method = "spearman") {
   # setup
@@ -2126,125 +2046,23 @@ cor_result_to_edges <- function(cor_result, self=FALSE) {
 
 
 #
-# extract pairs of colocalized regions
-# get normalized count matrices
-#
-# panck cd45
-# panck_cd45_meta <- samples %>%
-#   filter(segment == "panck" | segment == "cd45") %>%
-#   group_by(slide_id, roi_group) %>%
-#   filter(n() == 2) %>%
-#   ungroup() %>%
-#   mutate(pair_id = paste0("s_", slide_id, "_", roi_group)) %>%
-#   arrange(pair_id)
-# table(panck_cd45_meta$segment)
-# 
-# paired_panck_cd45 <- list()
-# paired_panck_cd45$panck <- subset_paired_segment(panck_cd45_meta, voom_bgsub_q3, "panck")
-# paired_panck_cd45$cd45 <- subset_paired_segment(panck_cd45_meta, voom_bgsub_q3, "cd45")
-
-# panck sma
-# panck_sma_meta <- samples %>%
-#   filter(segment == "panck" | segment == "sma") %>%
-#   group_by(slide_id, roi_group) %>%
-#   filter(n() == 2) %>%
-#   ungroup() %>%
-#   mutate(pair_id = paste0("s_", slide_id, "_", roi_group)) %>%
-#   arrange(pair_id)
-# table(panck_sma_meta$segment)
-# 
-# paired_panck_sma <- list()
-# paired_panck_sma$panck <- subset_paired_segment(panck_sma_meta, voom_bgsub_q3, "panck")
-# paired_panck_sma$sma <- subset_paired_segment(panck_sma_meta, voom_bgsub_q3, "sma")
-
-
-#
 # correlation analysis
 #
-norm_count_mat <- counts_gene_qnorm_lcpm
 nperms <- 10000
 cor_qval_cutoff <- 0.01
 cor_r_cutoff <- 0.6
 cor_weight_beta <- 4
 graph_min_csize <- 10
-graph_clust_resolution <- 0.25
-
-# panck-cd45 correlation
-# paired_panck_cd45$cor_result <- cor_compute(paired_panck_cd45$panck$mat,
-#                                             paired_panck_cd45$cd45$mat,
-#                                             nperms)
-# saveRDS(paired_panck_cd45$cor_result, file=file.path(working_dir, "cor_panck_cd45.rds"))
-#paired_panck_cd45$cor_result <- readRDS(file.path(working_dir, "cor_panck_cd45.rds"))
-
-# panck-sma correlation
-# paired_panck_sma$cor_result <- cor_compute(paired_panck_sma$panck$mat,
-#                                            paired_panck_sma$sma$mat,
-#                                            nperms)
-# saveRDS(paired_panck_sma$cor_result, file=file.path(working_dir, "cor_panck_sma.rds"))
-#paired_panck_sma$cor_result <- readRDS(file.path(working_dir, "cor_panck_sma.rds"))
+graph_clust_resolution <- 0.75
 
 # panck self correlation
-panck_cor_mat <- norm_count_mat
-rownames(panck_cor_mat) <- paste0("panck_", rownames(norm_count_mat))
+panck_cor_mat <- norm_count_lcpm
+rownames(panck_cor_mat) <- paste0("panck_", rownames(norm_count_lcpm))
 panck_cor_res <- cor_compute(panck_cor_mat,
                              panck_cor_mat,
                              nperms)
-saveRDS(panck_cor_res, file=file.path(working_dir, "cor_panck.rds"))
+# saveRDS(panck_cor_res, file=file.path(working_dir, "cor_panck.rds"))
 panck_cor_res <- readRDS(file.path(working_dir, "cor_panck.rds"))
-
-# cd45 self correlation
-#cd45_cor_mat <- cd45_voom_lcpm
-#rownames(cd45_cor_mat) <- paste0("cd45_", rownames(cd45_voom_lcpm))
-# cd45_cor_res <- cor_compute(cd45_cor_mat, 
-#                             cd45_cor_mat, 
-#                             nperms)
-# saveRDS(cd45_cor_res, file=file.path(working_dir, "cor_cd45.rds"))
-#cd45_cor_res <- readRDS(file.path(working_dir, "cor_cd45.rds"))
-
-# sma self correlation
-#sma_cor_mat <- sma_voom_lcpm
-#rownames(sma_cor_mat) <- paste0("sma_", rownames(sma_voom_lcpm))
-# sma_cor_res <- cor_compute(sma_cor_mat, 
-#                            sma_cor_mat, 
-#                            nperms)
-# saveRDS(sma_cor_res, file=file.path(working_dir, "cor_sma.rds"))
-#sma_cor_res <- readRDS(file.path(working_dir, "cor_sma.rds"))
-
-#
-# construct network
-#
-# edges
-# edges_all <- bind_rows(cor_result_to_edges(paired_panck_cd45$cor_result),
-#                        cor_result_to_edges(paired_panck_sma$cor_result),
-#                        cor_result_to_edges(panck_cor_res, self=TRUE),
-#                        cor_result_to_edges(cd45_cor_res, self=TRUE),
-#                        cor_result_to_edges(sma_cor_res, self=TRUE))
-# 
-# # filter significant edges
-# edges <- filter(edges_all, qval < cor_qval_cutoff,
-#                 cor >= cor_r_cutoff)
-# edges$weight <- abs(edges$cor) ** cor_weight_beta
-# # nodes
-# nodes_panck <- bind_cols(label = rownames(panck_cor_mat),
-#                          orig_gene = rownames(grade_voom_lcpm),
-#                          type = "panck",
-#                          grade_subtype = grade_de_merged$subtype,
-#                          grade_log2fc = grade_de_merged$log2fc_path_hgd_vs_lgd)
-# nodes_cd45 <- bind_cols(label = rownames(cd45_cor_mat),
-#                         orig_gene = rownames(cd45_voom_lcpm),
-#                         type = "cd45",
-#                         grade_subtype = "cd45",
-#                         grade_log2fc = 0)
-# nodes_sma <- bind_cols(label = rownames(sma_cor_mat),
-#                        orig_gene = rownames(sma_voom_lcpm),
-#                        type = "sma",
-#                        grade_subtype = "sma",
-#                        grade_log2fc = 0)
-# nodes <- bind_rows(nodes_panck, nodes_cd45, nodes_sma)
-# nodes$id <- nodes$label
-# # filter nodes
-# nodes <- nodes %>% filter(id %in% union(edges$source, edges$target))
-
 
 #
 # panck network
@@ -2260,7 +2078,7 @@ edges$weight <- abs(edges$cor) ** cor_weight_beta
 
 # nodes
 nodes <- bind_cols(label = rownames(panck_cor_mat),
-                   orig_gene = rownames(norm_count_mat),
+                   orig_gene = rownames(norm_count_lcpm),
                    type = "panck",
                    grade_subtype = grade_de_merged$subtype,
                    grade_log2fc = grade_de_merged$log2fc_path_hgd_vs_lgd,
@@ -2444,8 +2262,8 @@ for (i in 1:length(unique(clust_nodes$community))) {
 
 yy
 
-enrichplot::dotplot(yy[[1]])
-enrichplot::dotplot(yy[[1]], showCategory = 3, font.size = 6)
+enrichplot::dotplot(yy[[3]])
+enrichplot::dotplot(yy[[3]], showCategory = 3, font.size = 6)
 
 
 str(yy)
