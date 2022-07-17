@@ -39,6 +39,7 @@ count_data_sheet <- "BioProbeCountMatrix"
 msigdb_symbol_file <- file.path(data_dir, "msigdb.v7.5.1.symbols.gmt")
 hpa_path_file <- file.path(data_dir, "hpa_pathology.tsv")
 cptac_panc_file <- file.path(data_dir, "cptac_panc_supp_mmc3.xlsx")
+oncotarget_panc_file <- file.path(data_dir, "oncotarget-08-42537-s002.xlsx")
 gs_wikipathways_file <- file.path(data_dir, "WikiPathways_2019_Human.txt")
 gs_reactome_file <- file.path(data_dir, "Reactome_2016.txt")
 
@@ -46,11 +47,11 @@ gs_reactome_file <- file.path(data_dir, "Reactome_2016.txt")
 analysis_segments = c("panck")
 
 # qc filtering parameters
-qc_min_counts = 50000
-qc_min_auc = 0.6
+qc_min_counts = 100000
+qc_min_auc = 0.65
 qc_negprobe_lod_quantile = 0.9
 qc_min_negprobe_geomean = 1
-qc_min_frac_expr = 0.25
+qc_min_frac_expr = 0.2
 
 # de params
 de_norm_method = "RLE"
@@ -102,22 +103,25 @@ get_color_scales <- function(slide_ids) {
     path = c(lgd="#AAAAAA", hgd="#DD0000"),
     pathbw = c(lgd="#cccccc", hgd="#333333"),
     histology = c(pb = "#32cd32", intestinal = "#670092", gf="#1677c4"),
-    histology2 = c(intestinal = "#fff01f", pb = "#1BF118", gf="#360167"),
     histpath = c(panck_intlgd="#f0ceff", panck_inthgd="#b042ff", 
-                 panck_pblgd="#9df985", panck_pbhgd="#00ab08"),
+                 panck_pblgd="#1677c4", panck_pbhgd="#00ab08"),
     # histpath = c(panck_intlgd="#f0ceff", panck_inthgd="#b042ff", 
     #              panck_pblgd="#9df985", panck_pbhgd="#00ab08",
     #              cd45_intlgd="#86c3fa", cd45_inthgd="#1750ac",
     #              cd45_pblgd="#fff192", cd45_pbhgd="#ffd400",
     #              sma_intlgd="#ff9090", sma_inthgd="#ec0000",
     #              sma_pblgd="#ffddb3", sma_pbhgd="#ff8c00"),
-    #histpath = c(panck_intlgd="#f0ceff", panck_inthgd="#c175ff", panck_pblgd="#00ffff", panck_pbhgd="#00bb00"),
     hgd_histology = c(pb = "#32cd32", intestinal = "#670092"),
     carcinoma = c(no = "#666666", yes = "#ff0000"),
     auc_quant = c("1"="#0000ff", "2"="#00ff00", "3"="#ff0000"),
     prognostic=c(no="#aaaaaa", fav="#00FFFF", unfav="#FFFF00"),
     de_cptac_rna = c(no="#aaaaaa", dn="#00FFFF", up="#FFFF00", na="#FFFFFF"), 
-    de_cptac_prot = c(no="#aaaaaa", dn="#00FFFF", up="#FFFF00", na="#FFFFFF")
+    de_cptac_prot = c(no="#aaaaaa", dn="#00FFFF", up="#FFFF00", na="#FFFFFF"),
+    grade_subtype = c(none = "#888888", hgd = "#FF0000", lgd = "#0000FF", pbhgd = "#32cd32",
+                      inthgd = "#670092", pblgd = "#1677c4", intlgd = "#ff6700"),
+    hist_subtype = c(none = "#888888", pb = "#32cd32",
+                      int = "#670092", gf = "#1677c4",
+                      pbgf = "#ff6700", pbint = "#ff0000")
   )
   x <- pals::glasbey(length(unique(slide_ids)))
   color_scales$slide_id = setNames(x, unique(slide_ids))
@@ -327,6 +331,7 @@ samples$roi_group <- factor(samples$roi_group)
 
 table(samples$segment, samples$histology)
 table(samples$histpath)
+summary(samples$pct_expressed)
 
 # color scales for plots
 color_scales <- get_color_scales(unique(samples$slide_id))
@@ -361,14 +366,18 @@ counts_probe <- bind_rows(counts_probe, counts_negprobe)
 frac_expr <- calc_frac_expr(select(counts_probe, samples$aoi_id), samples$negprobe_lod)
 counts_probe <- counts_probe %>%
   mutate(frac_expr = frac_expr, .after = "gene_symbol") %>%
+  group_by(entrez_id) %>%
+  mutate(frac_expr_avg = mean(frac_expr)) %>%
+  ungroup() %>%
   mutate(expressed = case_when(probe_type == 0 ~ "bg",
-                               frac_expr <= qc_min_frac_expr ~ "no",
+                               frac_expr_avg <= qc_min_frac_expr ~ "no",
                                TRUE ~ "yes"))
+summary(counts_probe$frac_expr)
 table(counts_probe$expressed)
 
 # filter probes with low expression
 # fcounts_probe <- filter(counts_probe, (probe_type == 0) | (frac_expr > qc_min_frac_expr))
-fcounts_probe <- filter(counts_probe, probe_type == 1, frac_expr > qc_min_frac_expr)
+fcounts_probe <- filter(counts_probe, probe_type == 1, frac_expr_avg > qc_min_frac_expr)
 
 #
 # normalized count matrices
@@ -437,6 +446,135 @@ norm_count_lcpm <- gene_bgsub_qnorm_lcpm
 # norm_count_voom <- gene_bgsub_voom
 # norm_count_lcpm <- gene_bgsub_voom_lcpm
 
+
+##################################################
+#
+# Setup gene annotation
+#
+##################################################
+
+read_cptac_pdac_data <- function(filename, log2fc_cutoff, padj_cutoff) {
+  rna <- read_excel(filename, sheet="Diff_exp_RNA")
+  rna <- rna %>%
+    dplyr::rename(gene_symbol = GeneSymbol,
+                  log2fc = MedianLog2FoldChange,
+                  pval = `p value`,
+                  fdr = FDR) %>%
+    dplyr::mutate(analysis = "cptac_rna", 
+                  de = case_when(fdr > padj_cutoff ~ "no",
+                                 abs(log2fc) <= log2fc_cutoff ~ "no",
+                                 log2fc < -log2fc_cutoff ~ "dn",
+                                 log2fc > log2fc_cutoff ~ "up",
+                                 TRUE ~ "no"))
+  
+  # GeneSymbol	MedianLog2FoldChange	p value	FDR	
+  # MedianLog2FoldChange.duct	p value.duct	FDR.duct	
+  # Expression Coefficient	p value of adjusted expression	FDR of adjusted expression
+  # TODO: add duct / epithelial filtered data
+  prot <- read_excel(cptac_panc_file, sheet="Diff_exp_prot")
+  prot <- prot %>%
+    dplyr::rename(
+      gene_symbol = GeneSymbol,
+      log2fc = MedianLog2FoldChange,
+      pval = `p value`,
+      fdr = FDR
+    ) %>%
+    select(gene_symbol, log2fc, pval, fdr) %>%
+    mutate(analysis = "cptac_prot",
+           de = case_when(fdr > padj_cutoff ~ "no",
+                          abs(log2fc) <= log2fc_cutoff ~ "no",
+                          log2fc < -log2fc_cutoff ~ "dn",
+                          log2fc > log2fc_cutoff ~ "up",
+                          TRUE ~ "no"))
+  return(bind_rows(rna, prot))
+}
+
+get_cptac_gene_sets <- function(cptac_de_data) {
+  cptac_rna_up <- cptac_de_data %>% filter(analysis == "cptac_rna", de == "up") %>% select(gene_symbol) %>% pull()
+  cptac_rna_dn <- cptac_de_data %>% filter(analysis == "cptac_rna", de == "dn") %>% select(gene_symbol) %>% pull()
+  cptac_prot_up <- cptac_de_data %>% filter(analysis == "cptac_prot", de == "up") %>% select(gene_symbol) %>% pull()
+  cptac_prot_dn <- cptac_de_data %>% filter(analysis == "cptac_prot", de == "dn") %>% select(gene_symbol) %>% pull()
+  cptac_de_gs <- list("CPTAC_RNA_UP" = cptac_rna_up,
+                      "CPTAC_RNA_DN" = cptac_rna_dn,
+                      "CPTAC_PROT_UP" = cptac_prot_up,
+                      "CPTAC_PROT_DN" = cptac_prot_dn)
+}
+
+
+read_hpa_data <- function(hpa_path_file) {
+  x <- read.table(hpa_path_file, header=TRUE, sep="\t")
+  colnames(x) <- c("ens_gene_id", "gene_symbol", "cancer_type",
+                   "ihc_high", "ihc_medium", "ihc_low", "ihc_not_detected",
+                   "prog_fav", "unprog_fav", "prog_unfav", "unprog_unfav")
+  x <- as_tibble(x) %>%
+    distinct(gene_symbol, cancer_type, .keep_all=TRUE) %>%
+    mutate(cancer_type = str_replace(cancer_type, " ", "_")) %>%
+    mutate(prognostic = case_when(!is.na(prog_fav) ~ "fav",
+                                  !is.na(prog_unfav) ~ "unfav",
+                                  TRUE ~ "no")) %>%
+    select(ens_gene_id, gene_symbol, cancer_type, prognostic, prog_fav, prog_unfav)
+  return(x)
+}
+
+get_hpa_gene_sets <- function(hpa) {
+  gs = list()
+  for (catype in unique(hpa$cancer_type)) {
+    unfav <- filter(hpa, cancer_type == catype, prognostic == "unfav")  %>% select(gene_symbol) %>% pull()
+    fav <- filter(hpa, cancer_type == catype, prognostic == "fav")  %>% select(gene_symbol) %>% pull()
+    unfav_name <- paste0("HPA_", toupper(catype), "_UNFAV_PROGNOSIS")
+    fav_name <- paste0("HPA_",  toupper(catype), "_FAV_PROGNOSIS")
+    x <- setNames(list(unfav, fav), c(unfav_name, fav_name))
+    gs <- append(gs, x)
+  }
+  gs
+}
+
+# define background gene set
+cta_genes <- unique(gene_meta$gene_symbol)
+length(cta_genes)
+# write cta genes to file (background gene set)
+write.table(cta_genes, file=file.path(working_dir, cta_bg_gene_symbols_txt),
+            quote=FALSE, row.names=FALSE, col.names=FALSE)
+
+# read cptac data
+cptac_de_data <- read_cptac_pdac_data(cptac_panc_file, gsea_log2fc_cutoff, gsea_padj_cutoff)
+cptac_de_data <- filter(cptac_de_data, gene_symbol %in% cta_genes)
+# merge gene annotation data
+cptac_de_merged <- cptac_de_data %>%
+  pivot_wider(names_from = analysis, values_from = c(log2fc, pval, fdr, de))
+
+# read hpa data
+hpa <- read_hpa_data(hpa_path_file)
+hpa <- filter(hpa, gene_symbol %in% cta_genes)
+hpa_pdac <- filter(hpa, cancer_type == "pancreatic_cancer")
+
+# read oncotarget data
+oncotarget_data <- read_excel(oncotarget_panc_file)
+oncotarget_data <- oncotarget_data %>% filter(gene_symbol %in% cta_genes)
+oncotarget_data <- oncotarget_data %>% filter(abs(log_ratio) > 1, fdr < 0.01)
+oncotarget_up <- oncotarget_data %>% filter(log_ratio > 0) %>% pull(gene_symbol)
+oncotarget_dn <- oncotarget_data %>% filter(log_ratio < 0) %>% pull(gene_symbol)
+oncotarget_gs <- list("LI_PDAC_RNA_UP" = oncotarget_up,
+                      "LI_PDAC_RNA_DN" = oncotarget_dn)
+
+gene_annot <- gene_meta %>%
+  left_join(hpa_pdac, by=c("gene_symbol"="gene_symbol")) %>%
+  left_join(cptac_de_merged, by=c("gene_symbol" = "gene_symbol")) %>%
+  mutate(de_cptac_rna = replace_na(de_cptac_rna, "na"),
+         de_cptac_prot = replace_na(de_cptac_prot, "na"))
+
+# subtype specific scaled expression
+inthgd_aois <- samples %>% filter(histpath == "panck_inthgd") %>% pull(aoi_id)
+intlgd_aois <- samples %>% filter(histpath == "panck_intlgd") %>% pull(aoi_id)
+pbhgd_aois <- samples %>% filter(histpath == "panck_pbhgd") %>% pull(aoi_id)
+pblgd_aois <- samples %>% filter(histpath == "panck_pblgd") %>% pull(aoi_id)
+x <- t(scale(t(norm_count_lcpm)))
+gene_annot <- bind_cols(gene_annot,
+                        inthgd_scaled_mean = rowMeans(x[, inthgd_aois]),
+                        intlgd_scaled_mean = rowMeans(x[, intlgd_aois]),
+                        pbhgd_scaled_mean = rowMeans(x[, pbhgd_aois]),
+                        pblgd_scaled_mean = rowMeans(x[, pblgd_aois]))
+
 ##################################################
 #
 # Quality Control Plots
@@ -444,11 +582,14 @@ norm_count_lcpm <- gene_bgsub_qnorm_lcpm
 ##################################################
 
 table(metadata$segment)
+table(metadata$segment, metadata$slide_id)
 summary(metadata$AOINucleiCount)
 summary(metadata$num_counts)
 summary(metadata$pct_expressed)
 table(metadata$qcfail, metadata$segment)
 table(counts_probe$frac_expr > qc_min_frac_expr)
+nrow(gene_meta)
+length(unique(ipmn$counts$GeneID))
 
 # figure: AOINucleiCount versus num_counts
 x <- cor.test(metadata$AOINucleiCount, metadata$num_counts)
@@ -504,11 +645,11 @@ p <- ggplot(metadata, aes(x=num_counts, y=auc, color=qcfail)) +
   xlab("Total Counts") +
   ylab("snAUC") +
   labs(color = "Segment") +
-  theme_minimal() +
-  facet_wrap(~factor(segment, levels=c("cd45", "sma", "panck")))
+  theme_minimal()
+#  facet_wrap(~factor(segment, levels=c("cd45", "sma", "panck")))
 p
 f <- file.path(plot_dir, "scatter_counts_vs_auc_bysegment.pdf")
-ggsave(f, plot=p, device="pdf", width = 8, height = 4)
+ggsave(f, plot=p, device="pdf", width = 4, height = 3)
 
 # figure: boxplot path versus nuclei count by slide
 p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=AOINucleiCount)) +
@@ -519,7 +660,8 @@ p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=AOINucleiCount)
   xlab("Pathology") +
   ylab("Nuclei Count") +
   labs(fill = "Pathology") +
-  theme(legend.position="bottom") +
+  theme_minimal() +
+  theme(legend.position="bottom")
   facet_grid(cols = vars(slide_id)) 
 p
 f <- file.path(plot_dir, "boxplot_path_vs_nuclei_byslide.pdf")
@@ -527,7 +669,7 @@ ggsave(f, plot=p, device="pdf", width = 8, height = 4)
 
 # figure: boxplot path versus total counts by slide
 p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=num_counts)) +
-  geom_boxplot(aes(fill=path), outlier.shape=NA) +
+  geom_boxplot(aes(fill=path), width=0.5, outlier.shape=NA) +
   geom_point(aes(fill=path), color="black", size=2, position=position_jitterdodge(jitter.width=0.15)) +
   scale_y_continuous(trans="log10") +
   scale_fill_manual(values=color_scales$path) +
@@ -535,11 +677,30 @@ p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=num_counts)) +
   xlab("Pathology") +
   ylab("Total Counts") +
   labs(fill = "Pathology") +
-  theme(legend.position="bottom") +
-  facet_grid(cols = vars(slide_id)) 
+  theme_minimal() +
+  theme(legend.position="bottom")
+  #facet_grid(cols = vars(slide_id)) 
 p
-f <- file.path(plot_dir, "boxplot_path_vs_counts_byslide.pdf")
-ggsave(f, plot=p, device="pdf", width = 8, height = 4)
+f <- file.path(plot_dir, "boxplot_path_vs_counts.pdf")
+ggsave(f, plot=p, device="pdf", width = 3, height = 3)
+
+# figure: boxplot path versus auc
+p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=auc)) +
+  #geom_violin(aes(fill=path), trim=FALSE) +
+  geom_boxplot(aes(fill=path), width=0.5, outlier.shape=NA) +
+  geom_point(aes(fill=path), color="black", size=2, position=position_jitterdodge(jitter.width=0.15)) +
+  scale_y_continuous(trans="log10") +
+  scale_fill_manual(values=color_scales$path) +
+  scale_color_manual(values=color_scales$path) +
+  xlab("Pathology") +
+  ylab("snAUC") +
+  labs(fill = "Pathology") +
+  theme_minimal() +
+  theme(legend.position="bottom")
+  #facet_grid(cols = vars(slide_id)) 
+p
+f <- file.path(plot_dir, "boxplot_path_vs_auc.pdf")
+ggsave(f, plot=p, device="pdf", width = 3, height = 3)
 
 # figure: boxplot path versus auc by slide
 p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=auc)) +
@@ -559,7 +720,7 @@ ggsave(f, plot=p, device="pdf", width = 8, height = 4)
 
 # figure: gene filtering fraction expressed cutoff
 p <- ggplot(filter(counts_probe, probe_type == 1), aes(x=frac_expr)) +
-  geom_histogram(binwidth=0.025, color="black", fill="grey") +
+  geom_histogram(binwidth=0.05, color="black", fill="grey") +
   geom_vline(xintercept = qc_min_frac_expr, linetype="dashed", color="red") +
   theme_minimal() +
   xlab("Fraction Expressed Above Background") +
@@ -568,7 +729,6 @@ p <- ggplot(filter(counts_probe, probe_type == 1), aes(x=frac_expr)) +
 p
 f <- file.path(plot_dir, "histogram_frac_expr.pdf")
 ggsave(f, plot=p, device="pdf", width = 4, height = 4)
-
 
 #
 # count ridge plots
@@ -752,8 +912,8 @@ pca_res <- run_pca(y, samples)
 pca_tbl <- pca_res$tbl
 tsne_res <- run_tsne(y, samples, perp=11)
 tsne_tbl <- tsne_res$tbl
-write_xlsx(tsne_tbl, file.path(working_dir, tsne_results_xlsx_file))
-#tsne_tbl <- read_xlsx(file.path(working_dir, tsne_results_xlsx_file), sheet = "Sheet1")
+#write_xlsx(tsne_tbl, file.path(working_dir, tsne_results_xlsx_file))
+tsne_tbl <- read_xlsx(file.path(working_dir, tsne_results_xlsx_file), sheet = "Sheet1")
 
 # pca
 pr <- pca_res$pr
@@ -767,6 +927,25 @@ p <- ggplot(pca_tbl, aes(x=PC1, y=PC2, color=histology, shape=path)) +
 p
 f <- file.path(plot_dir, "pca_histology.pdf")
 ggsave(f, plot=p, device="pdf", width=6, height=5)
+
+p <- ggplot(pca_tbl, aes(x=PC1, y=PC2, color=slide_id, shape=path)) +
+  geom_point(size=3) +
+  scale_color_manual(values=color_scales$slide_id) +
+  theme_minimal() +
+  labs(x=pct[1], y=pct[2])
+p
+f <- file.path(plot_dir, "pca_slide.pdf")
+ggsave(f, plot=p, device="pdf", width=6, height=5)
+
+p <- ggplot(pca_tbl, aes(x=PC1, y=PC2, color=carcinoma, shape=path)) +
+  geom_point(size=3) +
+  scale_color_manual(values=color_scales$carcinoma) +
+  theme_minimal() +
+  labs(x=pct[1], y=pct[2])
+p
+f <- file.path(plot_dir, "pca_carcinoma.pdf")
+ggsave(f, plot=p, device="pdf", width=6, height=5)
+
 
 # tsne
 p <- ggplot(tsne_tbl, aes(x=tsne1, y=tsne2, color=histology, shape=path)) +
@@ -869,6 +1048,8 @@ contrasts = makeContrasts(hist_pb_vs_gf = pb - gf,
                           hist_pb_vs_int = pb - intestinal,
                           hist_int_vs_gf = intestinal - gf,
                           hist_int = intestinal - (pb + gf)/2,
+                          hist_pb = pb - (intestinal + gf)/2,
+                          hist_gf = gf - (pb + intestinal)/2,
                           levels=design)
 
 # qnorm
@@ -896,6 +1077,7 @@ hist_de_merged <- hist_de_merged %>%
                              de_hist_pb_vs_gf == "dn" & de_hist_int_vs_gf == "up" ~ "intgf",
                              TRUE ~ "none"))
 table(hist_de_merged$subtype)
+nrow(filter(hist_de_merged, subtype != "none"))
 
 # write results
 write_xlsx(list(samples = samples,
@@ -913,6 +1095,8 @@ colnames(design)
 colnames(design) <- levels(samples$histpath)
 colnames(design)
 contrasts = makeContrasts(path_hgd_vs_lgd = (panck_pbhgd + panck_inthgd)/2 - (panck_intlgd + panck_pblgd)/2,
+                          path_inthgd_vs_lgd = panck_inthgd - (panck_pblgd + panck_intlgd)/2,
+                          path_pbhgd_vs_lgd = panck_pbhgd - (panck_pblgd + panck_intlgd)/2,
                           path_pbhgd_vs_intlgd = panck_pbhgd - panck_intlgd,
                           path_pbhgd_vs_pblgd = panck_pbhgd - panck_pblgd,
                           path_inthgd_vs_intlgd = panck_inthgd - panck_intlgd,
@@ -936,16 +1120,18 @@ grade_de <- res
 # merged de analyses
 grade_de_merged <- select(grade_de, gene, analysis, avgexpr, log2fc, padj, de) %>%
   pivot_wider(names_from = analysis, values_from = c(log2fc, padj, de))
-
 grade_de_merged <- grade_de_merged %>%
-  mutate(subtype = case_when(de_path_pbhgd_vs_pblgd == "up" & de_path_inthgd_vs_intlgd == "up" ~ "hgd",
-                             de_path_pbhgd_vs_pblgd == "dn" & de_path_inthgd_vs_intlgd == "dn" ~ "lgd",
-                             de_path_pbhgd_vs_pblgd == "up" ~ "pbhgd",
-                             de_path_inthgd_vs_intlgd == "up" ~ "inthgd",
-                             de_path_pbhgd_vs_pblgd == "dn" ~ "pblgd",
-                             de_path_inthgd_vs_intlgd == "dn" ~ "intlgd",
-                             TRUE ~ "none"))
+  mutate(subtype = case_when(
+    de_path_hgd_vs_lgd == "up" ~ "hgd",
+    de_path_hgd_vs_lgd == "dn" ~ "lgd",
+    de_path_inthgd_vs_intlgd == "up" ~ "inthgd",
+    de_path_inthgd_vs_intlgd == "dn" ~ "intlgd",
+    de_path_pbhgd_vs_pblgd == "up" ~ "pbhgd",
+    de_path_pbhgd_vs_pblgd == "dn" ~ "pblgd",
+    TRUE ~ "none")
+  )
 table(grade_de_merged$subtype)
+
 
 # write gene expression data
 write_xlsx(list(samples = samples,
@@ -954,6 +1140,12 @@ write_xlsx(list(samples = samples,
                 merged_de = grade_de_merged),
            file.path(working_dir, de_results_grade_xlsx))
 
+# add to gene annotation
+gene_annot <- gene_annot %>%
+  left_join(select(grade_de_merged, gene, grade_subtype = subtype), by=c("gene_symbol"="gene")) %>%
+  left_join(select(hist_de_merged, gene, hist_subtype = subtype), by=c("gene_symbol"="gene"))
+colnames(gene_annot)
+
 ##################################################
 #
 #
@@ -961,82 +1153,6 @@ write_xlsx(list(samples = samples,
 #
 #
 ##################################################
-
-read_cptac_pdac_data <- function(filename, log2fc_cutoff, padj_cutoff) {
-  rna <- read_excel(filename, sheet="Diff_exp_RNA")
-  rna <- rna %>%
-    dplyr::rename(gene_symbol = GeneSymbol,
-                  log2fc = MedianLog2FoldChange,
-                  pval = `p value`,
-                  fdr = FDR) %>%
-    dplyr::mutate(analysis = "cptac_rna", 
-                  de = case_when(fdr > padj_cutoff ~ "no",
-                                 abs(log2fc) <= log2fc_cutoff ~ "no",
-                                 log2fc < -log2fc_cutoff ~ "dn",
-                                 log2fc > log2fc_cutoff ~ "up",
-                                 TRUE ~ "no"))
-
-  # GeneSymbol	MedianLog2FoldChange	p value	FDR	
-  # MedianLog2FoldChange.duct	p value.duct	FDR.duct	
-  # Expression Coefficient	p value of adjusted expression	FDR of adjusted expression
-  # TODO: add duct / epithelial filtered data
-  prot <- read_excel(cptac_panc_file, sheet="Diff_exp_prot")
-  prot <- prot %>%
-    dplyr::rename(
-      gene_symbol = GeneSymbol,
-      log2fc = MedianLog2FoldChange,
-      pval = `p value`,
-      fdr = FDR
-    ) %>%
-    select(gene_symbol, log2fc, pval, fdr) %>%
-    mutate(analysis = "cptac_prot",
-           de = case_when(fdr > padj_cutoff ~ "no",
-                          abs(log2fc) <= log2fc_cutoff ~ "no",
-                          log2fc < -log2fc_cutoff ~ "dn",
-                          log2fc > log2fc_cutoff ~ "up",
-                          TRUE ~ "no"))
-  return(bind_rows(rna, prot))
-}
-
-get_cptac_gene_sets <- function(cptac_de_data) {
-  cptac_rna_up <- cptac_de_data %>% filter(analysis == "cptac_rna", de == "up") %>% select(gene_symbol) %>% pull()
-  cptac_rna_dn <- cptac_de_data %>% filter(analysis == "cptac_rna", de == "dn") %>% select(gene_symbol) %>% pull()
-  cptac_prot_up <- cptac_de_data %>% filter(analysis == "cptac_prot", de == "up") %>% select(gene_symbol) %>% pull()
-  cptac_prot_dn <- cptac_de_data %>% filter(analysis == "cptac_prot", de == "dn") %>% select(gene_symbol) %>% pull()
-  cptac_de_gs <- list("CPTAC_RNA_UP" = cptac_rna_up,
-                      "CPTAC_RNA_DN" = cptac_rna_dn,
-                      "CPTAC_PROT_UP" = cptac_prot_up,
-                      "CPTAC_PROT_DN" = cptac_prot_dn)
-}
-
-
-read_hpa_data <- function(hpa_path_file) {
-  x <- read.table(hpa_path_file, header=TRUE, sep="\t")
-  colnames(x) <- c("ens_gene_id", "gene_symbol", "cancer_type",
-                   "ihc_high", "ihc_medium", "ihc_low", "ihc_not_detected",
-                   "prog_fav", "unprog_fav", "prog_unfav", "unprog_unfav")
-  x <- as_tibble(x) %>%
-    distinct(gene_symbol, cancer_type, .keep_all=TRUE) %>%
-    mutate(cancer_type = str_replace(cancer_type, " ", "_")) %>%
-    mutate(prognostic = case_when(!is.na(prog_fav) ~ "fav",
-                                  !is.na(prog_unfav) ~ "unfav",
-                                  TRUE ~ "no")) %>%
-    select(ens_gene_id, gene_symbol, cancer_type, prognostic, prog_fav, prog_unfav)
-  return(x)
-}
-
-get_hpa_gene_sets <- function(hpa) {
-  gs = list()
-  for (catype in unique(hpa$cancer_type)) {
-    unfav <- filter(hpa, cancer_type == catype, prognostic == "unfav")  %>% select(gene_symbol) %>% pull()
-    fav <- filter(hpa, cancer_type == catype, prognostic == "fav")  %>% select(gene_symbol) %>% pull()
-    unfav_name <- paste0("HPA_", toupper(catype), "_UNFAV_PROGNOSIS")
-    fav_name <- paste0("HPA_",  toupper(catype), "_FAV_PROGNOSIS")
-    x <- setNames(list(unfav, fav), c(unfav_name, fav_name))
-    gs <- append(gs, x)
-  }
-  gs
-}
 
 # heatmap functions
 plot_pheatmap <- function(m, 
@@ -1072,35 +1188,10 @@ save_pheatmap_pdf <- function(x, filename, width=7, height=7) {
 get_row_annot <- function(genes, gene_annot) {
   gene_annot %>%
     filter(gene_symbol %in% genes) %>%
-    select(gene_symbol, prognostic, de_cptac_rna, de_cptac_prot) %>%
+    select(gene_symbol, prognostic, de_cptac_rna, de_cptac_prot, grade_subtype, hist_subtype) %>%
     column_to_rownames("gene_symbol") %>%
     as.data.frame()
 }
-
-# define background gene set
-cta_genes <- unique(hist_de$gene)
-length(cta_genes)
-# write cta genes to file (background gene set)
-write.table(cta_genes, file=file.path(working_dir, cta_bg_gene_symbols_txt),
-            quote=FALSE, row.names=FALSE, col.names=FALSE)
-
-# read cptac data
-cptac_de_data <- read_cptac_pdac_data(cptac_panc_file, gsea_log2fc_cutoff, gsea_padj_cutoff)
-cptac_de_data <- filter(cptac_de_data, gene_symbol %in% cta_genes)
-# merge gene annotation data
-cptac_de_merged <- cptac_de_data %>%
-  pivot_wider(names_from = analysis, values_from = c(log2fc, pval, fdr, de))
-
-# read hpa data
-hpa <- read_hpa_data(hpa_path_file)
-hpa <- filter(hpa, gene_symbol %in% cta_genes)
-hpa_pdac <- filter(hpa, cancer_type == "pancreatic_cancer")
-
-gene_annot <- gene_meta %>%
-  left_join(hpa_pdac, by=c("gene_symbol"="gene_symbol")) %>%
-  left_join(cptac_de_merged, by=c("gene_symbol" = "gene_symbol")) %>%
-  mutate(de_cptac_rna = replace_na(de_cptac_rna, "na"),
-         de_cptac_prot = replace_na(de_cptac_prot, "na"))
 
 # 
 # histology analysis heatmap
@@ -1124,9 +1215,27 @@ save_pheatmap_pdf(p, filename=f, width=10, height=h)
 # 
 # grade analysis heatmap
 #
+# all hgd vs all lgd
+hgd_lgd_genes <- filter(grade_de_merged, de_path_hgd_vs_lgd != "no") %>% select(gene) %>% pull()
+nrow(filter(grade_de_merged, de_path_hgd_vs_lgd == "up"))
+nrow(filter(grade_de_merged, de_path_hgd_vs_lgd == "dn"))
+
+x <- norm_count_lcpm[hgd_lgd_genes,]
+nrow(x)
+annot_row <- get_row_annot(hgd_lgd_genes, gene_annot)
+annot_col <- column_to_rownames(samples, "aoi_id") %>% 
+  select(histology = histology,
+         pathbw = path, 
+         slide_id = slide_id) %>%
+  as.data.frame()
+f <- file.path(plot_dir, "heatmap_hgd_vs_lgd.pdf")
+p <- plot_pheatmap(x, annot_col, annot_row, color_scales)
+h <- round(3 + (length(hgd_lgd_genes) / 10))
+save_pheatmap_pdf(p, filename=f, width=10, height=h)
+dev.off()
+
 # union of subtype hgd genes
 table(grade_de_merged$subtype)
-#grade_genes <- filter(grade_de_merged, de_path_hgd_vs_lgd != "no") %>% select(gene) %>% pull()
 grade_genes <- filter(grade_de_merged, subtype != "none") %>% select(gene) %>% pull()
 x <- norm_count_lcpm[grade_genes,]
 nrow(x)
@@ -1202,6 +1311,50 @@ dev.off()
 ##################################################
 #
 #
+# Volcano plot of DE genes
+#
+#
+##################################################
+
+plot_de_volcano <- function(x) {
+  p <- ggplot(x, aes(x=log2fc, y=-log10(padj))) + 
+    geom_point(data=subset(x, de == "no"), color="#888888", size=1, alpha=0.4) + 
+    geom_point(data=subset(x, de == "up"), color="#ff0000", size=2, alpha=0.8) +
+    geom_point(data=subset(x, de == "dn"), color="#0000ff", size=2, alpha=0.8) +
+    geom_text_repel(data=subset(x, de != "no"), color="black", size=3, aes(label=gene), max.overlaps=Inf) +
+    ylab("-log10(adjusted p-value)") +
+    xlab("log2(Fold Change)") +
+    theme_minimal() +
+    theme(legend.position="bottom") + 
+    theme(axis.line = element_line(color = "black"))
+  return(p)
+}
+
+x <- filter(grade_de, analysis == "path_hgd_vs_lgd")
+p <- plot_de_volcano(x) +
+  ggtitle("DE genes (HGD vs LGD)")
+p
+f <- file.path(plot_dir, "volcano_de_hgd_vs_lgd.pdf")
+ggsave(f, plot=p, device="pdf", width=5, height=5)
+
+x <- filter(grade_de, analysis == "path_pbhgd_vs_pblgd")
+p <- plot_de_volcano(x) +
+  ggtitle("PB DE genes (PB-HGD vs PB-LGD)")
+p
+f <- file.path(plot_dir, "volcano_de_pbhgd_vs_lgd.pdf")
+ggsave(f, plot=p, device="pdf", width=5, height=5)
+
+x <- filter(grade_de, analysis == "path_inthgd_vs_intlgd")
+p <- plot_de_volcano(x) +
+  ggtitle("INT DE genes (INT-HGD vs INT-LGD)")
+p
+f <- file.path(plot_dir, "volcano_de_inthgd_vs_intlgd.pdf")
+ggsave(f, plot=p, device="pdf", width=5, height=5)
+
+
+##################################################
+#
+#
 # 2D plot of DE genes
 #
 #
@@ -1234,10 +1387,8 @@ none_data <- x %>%
   filter(subtype == "none")
 
 label_data <- filter(x, subtype != "none")
-label_data <- bind_rows(filter(label_data, subtype == "hgd") %>% slice_max(log2fc_path_pbhgd_vs_pblgd, n = 10),
-                        filter(label_data, subtype == "lgd") %>% slice_min(log2fc_path_pbhgd_vs_pblgd, n = 10),
-                        filter(label_data, subtype == "hgd") %>% slice_max(log2fc_path_inthgd_vs_intlgd, n = 10),
-                        filter(label_data, subtype == "lgd") %>% slice_min(log2fc_path_inthgd_vs_intlgd, n = 10),
+label_data <- bind_rows(filter(label_data, subtype == "hgd") %>% slice_max(log2fc_path_hgd_vs_lgd, n = 30),
+                        filter(label_data, subtype == "lgd") %>% slice_min(log2fc_path_hgd_vs_lgd, n = 10),
                         filter(label_data, subtype == "pbhgd") %>% slice_max(log2fc_path_pbhgd_vs_pblgd, n = 10),
                         filter(label_data, subtype == "pblgd") %>% slice_min(log2fc_path_pbhgd_vs_pblgd, n = 10),
                         filter(label_data, subtype == "inthgd") %>% slice_max(log2fc_path_inthgd_vs_intlgd, n = 10),
@@ -1355,16 +1506,36 @@ plot_grade_boxplot <- function(s, m, gene_symbol) {
   x <- s %>%
     select(aoi_id, slide_id, segment, histology, path, histpath) %>%
     add_column(gene = exprs)
-#  p <- ggplot(x, aes(x=reorder(histpath, gene), y=gene)) + 
   p <- ggplot(x, aes(x=histpath, y=gene)) + 
-    geom_boxplot(aes(fill = histpath), outlier.shape=NA) +
+    geom_boxplot(aes(fill = histpath), width=0.5, outlier.shape=NA) +
     geom_jitter(width=0.1) +
     scale_fill_manual(values=color_scales$histpath) +
     xlab("Histopathology") +
     ylab("log2 Normalized CPM") + 
     labs(fill = "Histopath") +
-    ggtitle(paste0("Gene: ", gene_symbol)) +
+    ggtitle(gene_symbol) +
     theme_minimal() + 
+    theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
+    theme(axis.line = element_line(color = "black"))
+  return(p)
+}
+
+
+plot_hgd_boxplot <- function(s, m, gene_symbol) {
+  exprs <- unlist(m[gene_symbol,])
+  x <- s %>%
+    select(aoi_id, slide_id, segment, histology, path, histpath) %>%
+    add_column(gene = exprs)
+  p <- ggplot(x, aes(x=path, y=gene)) + 
+    geom_boxplot(aes(fill = path), outlier.shape=NA, width=0.5) +
+    geom_jitter(width=0.1) +
+    scale_fill_manual(values=color_scales$path) +
+    xlab("Grade") +
+    ylab("log2 Normalized CPM") + 
+    labs(fill = "Grade") +
+    ggtitle(gene_symbol) +
+    theme_minimal() + 
+    theme(axis.line = element_line(color = "black")) +
     theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1))
   return(p)
 }
@@ -1377,10 +1548,10 @@ x <- norm_count_lcpm
 for (g in union(hist_genes, grade_genes)) {
   p <- plot_hist_boxplot(samples, x, g)
   f <- file.path(gene_plot_dir, paste0("boxplot_", g, "_hist.pdf"))
-  ggsave(f, p, width=5, height=5)
+  ggsave(f, p, width=3, height=4)
   p <- plot_grade_boxplot(samples, x, g)
   f <- file.path(gene_plot_dir, paste0("boxplot_", g, "_grade.pdf"))
-  ggsave(f, p, width=5, height=5)
+  ggsave(f, p, width=3, height=4)
 }
 
 # manually plot individual genes
@@ -1392,6 +1563,26 @@ p <- plot_hist_boxplot(samples, x, "CLU")
 ggsave(file.path(plot_dir, "hist_boxplot_clu.pdf"), p, width=3, height=5)
 p <- plot_hist_boxplot(samples, x, "RBP4")
 ggsave(file.path(plot_dir, "hist_boxplot_rbp4.pdf"), p, width=3, height=5)
+
+
+p <- plot_hgd_boxplot(samples, x, "FOSL1")
+ggsave(file.path(plot_dir, "hgd_boxplot_fosl1.pdf"), p, width=3, height=5)
+p <- plot_hgd_boxplot(samples, x, "AREG")
+ggsave(file.path(plot_dir, "hgd_boxplot_areg.pdf"), p, width=3, height=5)
+p <- plot_hgd_boxplot(samples, x, "CCL20")
+ggsave(file.path(plot_dir, "hgd_boxplot_ccl20.pdf"), p, width=3, height=5)
+p <- plot_hgd_boxplot(samples, x, "SERPINB5")
+ggsave(file.path(plot_dir, "hgd_boxplot_serpinb5.pdf"), p, width=3, height=5)
+p <- plot_hgd_boxplot(samples, x, "ITGA2")
+ggsave(file.path(plot_dir, "hgd_boxplot_itga2.pdf"), p, width=3, height=5)
+p <- plot_hgd_boxplot(samples, x, "LAMC2")
+ggsave(file.path(plot_dir, "hgd_boxplot_lamc2.pdf"), p, width=3, height=5)
+
+p <- plot_grade_boxplot(samples, x, "SMAD4")
+ggsave(file.path(plot_dir, "grade_boxplot_smad4.pdf"), p, width=3, height=4)
+
+plot_grade_boxplot(samples, x, "SMAD4")
+plot_grade_boxplot(samples, x, "CEACAM6")
 
 # lymphocyte marker
 plot_grade_boxplot(samples, x, "PTPRC")
@@ -1431,15 +1622,21 @@ plot_grade_boxplot(samples, x, "TOP2A")
 plot_grade_boxplot(samples, x, "CENPF")
 plot_grade_boxplot(samples, x, "UBE2C")
 
-plot_grade_boxplot(samples, x, "LAMC2")
+plot_grade_boxplot(samples, x, "CXCL8")
+plot_grade_boxplot(samples, x, "LAMB3")
 plot_grade_boxplot(samples, x, "LIF")
 plot_grade_boxplot(samples, x, "CXCL5")
 plot_grade_boxplot(samples, x, "CLU")
 plot_grade_boxplot(samples, x, "RBP4")
 plot_grade_boxplot(samples, x, "SMAD4")
+plot_grade_boxplot(samples, x, "CEACAM6")
+plot_grade_boxplot(samples, x, "CXCL14")
 
-grade_de_merged %>% filter(gene == "SMAD4") %>% as.data.frame()
+grade_de_merged %>% filter(gene == "CEACAM6") %>% as.data.frame()
 hist_de_merged %>% filter(gene == "SMAD4") %>% as.data.frame()
+
+grade_de_merged %>% filter(gene == "POU5F1") %>% as.data.frame()
+table(samples$histpath, samples$histology)
 
 ##################################################
 #
@@ -1458,6 +1655,26 @@ get_de_ranks <- function(de, a) {
   return(ranks)
 }
 
+run_batch_fgsea <- function(my_analyses, my_de, my_gs, my_prefix, my_plot_dir, my_padj_cutoff=0.01) {
+  gsea <- NULL
+  for (a in my_analyses) {
+    ranks <- get_de_ranks(my_de, a)
+    res <- fgsea(pathways = my_gs, stats = ranks, minSize = 10, eps = 0, nPermSimple = 10000)
+    res <- mutate(res, analysis = a)
+    gsea <- bind_rows(gsea, res)
+    
+    for (i in 1:nrow(res)) {
+      x <- res[i,]
+      if (x$padj >= my_padj_cutoff) { next }
+      print(x$pathway)
+      p <- plot_gsea_enrichment(x, ranks, my_gs)
+      f <- file.path(my_plot_dir, paste0(my_prefix, "_", a, "_gs_", x$pathway, ".pdf"))
+      ggsave(f, plot=p, device="pdf", width=5, height=3)
+    }
+  }
+  return(gsea)
+}
+
 plot_gsea_enrichment <- function(x, ranks, gs) {
   txt_stat <- paste0("ES=", round(x$ES,2), " NES=", round(x$NES, 2), " padj=", format(x$padj, scientific=TRUE, digits=3))
   txt_title <- paste0("ranks: ", a, " gs: ", x$pathway)
@@ -1470,11 +1687,85 @@ plot_gsea_enrichment <- function(x, ranks, gs) {
   return(p)
 }
 
+gmt_to_tbl <- function(gmt) {
+  gs_to_tbl <- function(gs_name, gs_genes) {
+    bind_cols(gs_name = rep(gs_name, length(gs_genes)),
+              gene_symbol = gs_genes)
+  }
+  tbl <- NULL
+  for (i in 1:length(gmt)) {
+    tbl <- bind_rows(tbl, gs_to_tbl(names(gmt)[i], gmt[[i]]))
+  }
+  return(tbl)
+}
+
+plot_gsea_volcano <- function(x, padj_cutoff = 0.01, max.overlaps = Inf) {
+  p <- ggplot(x, aes(x=NES, y=-log10(padj), color=analysis)) + 
+    geom_point(data=subset(x, padj > padj_cutoff), size=1, alpha=0.4) + 
+    geom_point(data=subset(x, padj <= padj_cutoff), size=2, alpha=0.8) +
+    geom_text_repel(data=subset(x, padj <= padj_cutoff), color="black", size=3, aes(label=pathway), max.overlaps=max.overlaps) +
+    ylab("-log10(adjusted p-value)") +
+    xlab("NES") +
+    theme_minimal() +
+    theme(legend.position="bottom") + 
+    theme(axis.line = element_line(color = "black")) +
+    coord_flip() 
+  return(p)
+}
+
+plot_gsea_barplot <- function(x, padj_cutoff = 0.01) {
+  x <- mutate(x, sig = ifelse(padj < padj_cutoff, ifelse(NES < 0, "dn", "up"), "no"),
+              neglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA))
+  p <- ggplot(x, aes(x=reorder(pathway, NES), y=NES, fill=neglog10padj)) +
+    geom_col() +
+    scale_fill_gradient(low = "blue", high = "cyan", na.value="#aaaaaa") +
+    coord_flip() +
+    labs(x="Analysis", y="Normalized Enrichment Score") +
+    theme_minimal()
+  return(p)
+}
+
+gsea_leading_edge_matrix <- function(x, my_padj_cutoff) {
+  # filter for significant results
+  sig_pathways <- x %>%
+    filter(padj < my_padj_cutoff) %>% select(pathway) %>% distinct() %>% pull()
+  x <- x %>%
+    filter(pathway %in% sig_pathways) %>%
+    arrange(desc(NES))
+  
+  # get leading edge genes
+  leading_edge_genes <- summarise(x, result = unlist(leadingEdge, use.names=FALSE)) %>% distinct() %>% pull()
+  
+  # matrix genes (rows) vs pathways (columns)
+  m <- matrix(data = 0, nrow=length(leading_edge_genes), ncol=nrow(x))
+  m <- as.data.frame(m)
+  rownames(m) <- leading_edge_genes
+  colnames(m) <- x$pathway
+  for (i in 1:nrow(x)) {
+    p <- x$pathway[i]
+    nes <- x$NES[i]
+    padj <- x$padj[i]
+    for (j in x$leadingEdge[i]) {
+      m[j, p] <- sign(nes)
+    }
+  }
+  # filter genes only found in a single pathway
+  m <- m[abs(rowSums(m)) >= 2, ]
+  # filter empty columns
+  m <- m[, abs(colSums(m)) > 1]
+  # order by number of pathways sharing the gene
+  m <- m[order(rowSums(m), decreasing=TRUE),]
+  m <- m[,order(colSums(m), decreasing=TRUE)]
+  return(m)
+}
+
+
 #
 # Setup Gene Sets
 # 
 # cptac gene sets
 cptac_gs <- get_cptac_gene_sets(cptac_de_data)
+lapply(cptac_gs, length)
 
 # hpa gene sets
 hpa_gs <- get_hpa_gene_sets(hpa)
@@ -1494,39 +1785,36 @@ gruetzmann_gs <- msigdb_gene_sets %>%
 gruetzmann_gs <- split(x = gruetzmann_gs$gene_symbol,
                        f = gruetzmann_gs$gs_name)
 
+# PDAC enrichment gene sets
+gs_pdac <- gruetzmann_gs
+gs_pdac <- append(gs_pdac, oncotarget_gs)
+gs_pdac <- append(gs_pdac, hpa_panc_gs)
+gs_pdac <- append(gs_pdac, cptac_gs)
+lapply(gs_pdac, length)
+
 # discovery analysis across msigdb gene sets
 gs_hallmark <- filter(msigdb_gene_sets, gs_cat == "H")
 gs_hallmark <- split(x = gs_hallmark$gene_symbol, f = gs_hallmark$gs_name)
 gs_gobp <- filter(msigdb_gene_sets, gs_cat == "C5", gs_subcat == "GO:BP")
 gs_gobp <- split(x = gs_gobp$gene_symbol, f = gs_gobp$gs_name)
+gs_reactome <- filter(msigdb_gene_sets, gs_cat == "C2", gs_subcat == "CP:REACTOME")
+gs_reactome <- split(x = gs_reactome$gene_symbol, f = gs_reactome$gs_name)
+gs_wp <- filter(msigdb_gene_sets, gs_cat == "C2", gs_subcat == "CP:WIKIPATHWAYS")
+gs_wp <- split(x = gs_wp$gene_symbol, f = gs_wp$gs_name)
 
 
 #
 # Setup analysis
 #
-method <- "limma_trend_qnorm"
-table(grade_de$analysis)
-analyses <- c("path_intlgd_vs_pblgd", "path_inthgd_vs_pblgd", "path_inthgd_vs_intlgd",
-              "path_pbhgd_vs_inthgd", "path_pbhgd_vs_intlgd", "path_pbhgd_vs_pblgd",
-              "path_hgd_vs_lgd")
 de <- bind_rows(hist_de, grade_de)
+analyses <- unique(de$analysis)
 
 #
 # PDAC GSEA Analysis
 #
 prefix <- "gsea_pdac"
-gs <- gruetzmann_gs
-gs <- append(gs, hpa_panc_gs)
-gs <- append(gs, cptac_gs)
-gs_pdac <- gs
-
-gsea = NULL
-for (a in analyses) {
-  ranks <- get_de_ranks(de, a)
-  res <- fgsea(pathways = gs, stats = ranks, minSize = 10, eps = 0, nPermSimple = 10000)
-  res <- mutate(res, method = method, analysis = a)
-  gsea <- bind_rows(gsea, res)
-}
+padj_cutoff <- 0.05
+gsea <- run_batch_fgsea(analyses, de, gs_pdac, "gsea_pdac", gsea_plot_dir, padj_cutoff)
 gsea_pdac <- as_tibble(gsea)
 
 # write gsea results
@@ -1535,50 +1823,16 @@ data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
 f <- file.path(working_dir, paste0(prefix, "_results.xlsx"))
 write_xlsx(gsea, f)
 
-# construct bar plots comparing analyses
-x <- filter(gsea_pdac, analysis %in% analyses)
-x$analysis <- factor(x$analysis, levels=analyses)
-x <- mutate(x, sig = ifelse(padj < gsea_padj_cutoff, ifelse(NES < 0, "dn", "up"), "no"),
-            neglog10padj = ifelse(padj < gsea_padj_cutoff, -log10(padj), NA))
-p <- ggplot(x, aes(x=analysis, y=NES, fill=neglog10padj)) +
-  geom_col() +
-  scale_fill_gradient(low = "blue", high = "cyan", na.value="#aaaaaa") +
-  coord_flip() +
-  labs(x="Analysis", y="Normalized Enrichment Score",
-       title="PDAC Gene Signatures") + 
-  theme_minimal() +
-  facet_wrap(~ pathway, ncol = 1)
-p
-ggsave(file.path(plot_dir, "gsea_pdac_barplots.pdf"), p, width=6, height=8)
-
 
 #
 # Hallmark gene set analysis
 #
 prefix <- "gsea_hallmark"
-gs <- gs_hallmark
-gsea = NULL
 padj_cutoff <- 0.01
-
-for (a in analyses) {
-  ranks <- get_de_ranks(de, a)
-  res <- fgsea(pathways = gs, stats = ranks, minSize = 10, eps = 0, nPermSimple = 10000)
-  res <- mutate(res, method = method, analysis = a)
-  gsea <- bind_rows(gsea, res)
-  
-  for (i in 1:nrow(res)) {
-    x <- res[i,]
-    if (x$padj >= padj_cutoff) { next }
-    print(x$pathway)
-    p <- plot_gsea_enrichment(x, ranks, gs)
-    f <- file.path(gsea_plot_dir, paste0(prefix, "_", a, "_gs_", x$pathway, ".pdf"))
-    ggsave(f, plot=p, device="pdf", width=5, height=3)
-  }
-}
+gsea <- run_batch_fgsea(analyses, de, gs_hallmark, prefix, gsea_plot_dir, padj_cutoff)
 gsea_hallmark <- as_tibble(gsea) %>%
   left_join(select(msigdb_gene_sets, gs_cat, gs_subcat, gs_name) %>% distinct(), 
             by=c("pathway"="gs_name"))
-
 # write gsea results
 f <- file.path(working_dir, paste0(prefix, "_results.tsv"))
 data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
@@ -1589,43 +1843,128 @@ write_xlsx(gsea, f)
 # Gene Ontology analysis
 #
 prefix <- "gsea_gobp"
-gs <- gs_gobp
-gsea = NULL
-for (a in analyses) {
-  ranks <- get_de_ranks(de, a)
-  res <- fgsea(pathways = gs, stats = ranks, minSize = 10, eps = 0, nPermSimple = 10000)
-  res <- mutate(res, method = method, analysis = a)
-  gsea <- bind_rows(gsea, res)
-
-  for (i in 1:nrow(res)) {
-    x <- res[i,]
-    if (x$padj >= padj_cutoff) { next }
-    print(x$pathway)
-    p <- plot_gsea_enrichment(x, ranks, gs)
-    f <- file.path(gsea_plot_dir, paste0(prefix, "_", a, "_gs_", x$pathway, ".pdf"))
-    ggsave(f, plot=p, device="pdf", width=5, height=3)
-  }
-}
+padj_cutoff <- 0.01
+gsea <- run_batch_fgsea(analyses, de, gs_gobp, prefix, gsea_plot_dir, padj_cutoff)
 gsea_gobp <- as_tibble(gsea) %>%
   left_join(select(msigdb_gene_sets, gs_cat, gs_subcat, gs_name) %>% distinct(), 
             by=c("pathway"="gs_name"))
-
 # write gsea results
 f <- file.path(working_dir, paste0(prefix, "_results.tsv"))
 data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
 f <- file.path(working_dir, paste0(prefix, "_results.xlsx"))
 write_xlsx(gsea, f)
 
+#
+# Additional analysis
+#
+# prefix <- "gsea_wp"
+# padj_cutoff <- 0.01
+# gsea <- run_batch_fgsea(analyses, de, gs_wp, prefix, gsea_plot_dir, padj_cutoff)
+# gsea_wp <- as_tibble(gsea) %>%
+#   left_join(select(msigdb_gene_sets, gs_cat, gs_subcat, gs_name) %>% distinct(), 
+#             by=c("pathway"="gs_name"))
+# # write gsea results
+# f <- file.path(working_dir, paste0(prefix, "_results.tsv"))
+# data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
+# f <- file.path(working_dir, paste0(prefix, "_results.xlsx"))
+# write_xlsx(gsea, f)
+# 
+# gsea %>% filter(analysis == "path_hgd_vs_lgd") %>% arrange(padj) %>% head(100)
+
 
 #
-# GSEA Volcano Plots
+# HGD vs LGD gsea plots
 #
-x <- gsea_hallmark
+x <- filter(gsea_hallmark, analysis == "path_hgd_vs_lgd")
+x$pathway <- gsub("HALLMARK_", "", x$pathway)
+p <- plot_gsea_barplot(x, padj_cutoff = 0.01)
+ggsave(file.path(plot_dir, "gsea_hgd_vs_lgd_hallmark_barplot.pdf"), plot=p, width=6, height=6)
+
+x <- filter(gsea_gobp, analysis == "path_hgd_vs_lgd", padj < 0.01)
+x$pathway <- gsub("GOBP_", "", x$pathway)
+p <- plot_gsea_barplot(x, padj_cutoff = 0.01)
+
+x <- filter(gsea_hallmark, analysis == "path_hgd_vs_lgd")
+x$pathway <- gsub("HALLMARK_", "", x$pathway)
+p <- plot_gsea_volcano(x, padj_cutoff = 0.01) + 
+  ggtitle("MSigDB Hallmark Gene Sets")
+p
+ggsave(file.path(plot_dir, "gsea_hgd_vs_lgd_hallmark_volcano.pdf"), plot=p, width=5, height=3)
+
+x <- filter(gsea_gobp, analysis == "path_hgd_vs_lgd")
+x$pathway <- gsub("GOBP_", "", x$pathway)
+p <- plot_gsea_volcano(x, padj_cutoff = 0.01, max.overlaps=Inf) + 
+  ggtitle("GO:BP Gene Sets")
+p
+ggsave(file.path(plot_dir, "gsea_hgd_vs_lgd_gobp_volcano.pdf"), plot=p, width=8, height=3)
+
+
+
+#
+# PDAC HGD vs LGD plots
+#
+padj_cutoff <- 0.05
+x <- filter(gsea_pdac, analysis == "path_hgd_vs_lgd")
+x <- mutate(x, sig = ifelse(padj < padj_cutoff, ifelse(NES < 0, "dn", "up"), "no"),
+            neglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA))
+p <- ggplot(x, aes(x=reorder(pathway, NES), y=NES, fill=neglog10padj)) +
+  geom_col() +
+  scale_fill_gradient(low = "#004488", high = "cyan", na.value="#aaaaaa") +
+  labs(x="Analysis", y="Normalized Enrichment Score",
+       title="PDAC Gene Sets") +
+  coord_flip() +
+  theme_minimal() + 
+  theme(axis.text.y = element_text(hjust=1, size=4)) +
+  theme(legend.position="bottom")
+p
+ggsave(file.path(plot_dir, "gsea_pdac_hgd_vs_lgd_barplots.pdf"), p, width=6, height=6)
+
+
+#
+# PDAC plots comparing analysis
+#
+unique(gsea_pdac$analysis)
+padj_cutoff <- 0.05
+plotanalyses <- c("path_intlgd_vs_pblgd", "path_inthgd_vs_pblgd", "path_inthgd_vs_intlgd",
+                  "path_pbhgd_vs_inthgd", "path_pbhgd_vs_intlgd", "path_pbhgd_vs_pblgd",
+                  "path_hgd_vs_lgd")
+x <- filter(gsea_pdac, analysis %in% plotanalyses)
+x$analysis <- factor(x$analysis, levels=plotanalyses)
+x <- x %>% mutate( 
+  sig = ifelse(padj < padj_cutoff, ifelse(NES < 0, "dn", "up"), "no"),
+  neglog10padj = -log10(x$padj),
+  score = NES * -log10(x$padj),
+  fillneglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA),
+  fillnes = ifelse(padj < padj_cutoff, NES, NA)
+)
+
+p <- ggplot(x, aes(x=analysis, y=NES, fill=fillneglog10padj)) +
+  geom_bar(stat="identity", position=position_dodge()) +
+#  coord_flip() +
+#  scale_fill_viridis_c() +
+  scale_fill_gradient(low = "#004488", high = "cyan", na.value="#aaaaaa") +
+  labs(x="Analysis", y="Normalized Enrichment Score",
+       title="PDAC Gene Signatures") + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1, size=6)) +
+  facet_wrap(~ pathway, nrow=1)
+p
+ggsave(file.path(plot_dir, "gsea_pdac_subtype_barplots.pdf"), p, width=9, height=5)
+#sp3+scale_color_gradientn(colours = rainbow(5))
+
+
+#
+# Hallmark analysis by subtype
+#
+padj_cutoff <- 0.01
+
+x <- filter(gsea_hallmark, analysis %in% plotanalyses)
+x$analysis <- factor(x$analysis, levels=plotanalyses)
 x$abbrev <- gsub("HALLMARK_", "", x$pathway)
 p <- ggplot(x, aes(x=NES, y=-log10(padj), color=analysis)) + 
   geom_point(data=subset(x, padj > padj_cutoff), size=1, alpha=0.4) + 
   geom_point(data=subset(x, padj <= padj_cutoff), size=2, alpha=0.8) +
-  geom_text_repel(data=subset(x, padj <= padj_cutoff), color="black", size=3, aes(label=abbrev), max.overlaps=Inf) +
+  geom_text_repel(data=subset(x, padj <= padj_cutoff), color="black", size=2, aes(label=abbrev), max.overlaps=Inf) +
   ylab("-log10(adjusted p-value)") +
   xlab("NES") +
   ggtitle("MSigDB Hallmark Gene Sets") +
@@ -1635,97 +1974,38 @@ p <- ggplot(x, aes(x=NES, y=-log10(padj), color=analysis)) +
   coord_flip() + 
   facet_wrap(~ analysis, ncol = 1)
 p
-ggsave(file.path(plot_dir, "gsea_hallmark_volcano.pdf"), plot=p, width=10, height=10)
+ggsave(file.path(plot_dir, "gsea_hallmark_subtype_volcano.pdf"), plot=p, width=4, height=10)
 
 
 # GO
-x <- gsea_gobp
+x <- filter(gsea_gobp, analysis %in% plotanalyses)
+x$analysis <- factor(x$analysis, levels=plotanalyses)
 x$abbrev <- gsub("GOBP_", "", x$pathway)
 p <- ggplot(x, aes(x=NES, y=-log10(padj), color=analysis)) + 
   geom_point(data=subset(x, padj > padj_cutoff), size=1, alpha=0.4) + 
   geom_point(data=subset(x, padj <= padj_cutoff), size=2, alpha=0.8) +
-  geom_text_repel(data=subset(x, padj <= padj_cutoff), color="black", size=3, aes(label=abbrev), max.overlaps=Inf) +
+  geom_text_repel(data=subset(x, padj <= padj_cutoff), color="black", size=2, aes(label=abbrev), max.overlaps=Inf) +
   ylab("-log10(adjusted p-value)") +
   xlab("NES") +
-  ggtitle("GOBP Gene Sets") +
+  ggtitle("GO:BP Gene Sets") +
   theme_minimal() +
   theme(legend.position="bottom") + 
   theme(axis.line = element_line(color = "black")) +
-  coord_flip() +
+  coord_flip() + 
   facet_wrap(~ analysis, ncol = 1)
 p
-ggsave(file.path(plot_dir, "gsea_gobp_volcano.pdf"), plot=p, width=10, height=10)
+ggsave(file.path(plot_dir, "gsea_gobp_subtype_volcano.pdf"), plot=p, width=10, height=15)
 
 #
 # GSEA Leading Edge
 #
-# merge de analyses
-# gsea_merged <- bind_rows(gsea_hallmark, gsea_gobp)
+padj_cutoff <- 0.01
 gsea_merged <- gsea_hallmark
-#gsea_merged <- gsea_gobp
-
-# perform leading edge analysis of top concepts
-analyses <- c("path_hgd_vs_lgd")
-# analyses <- c("path_hgd_vs_lgd", "path_pbhgd_vs_pblgd", "path_inthgd_vs_intlgd")
-# analyses <- unique(gsea_merged$analysis)
-sig_cutoff <- 0.01
-
-x <- gsea_merged %>%
-  filter(analysis %in% analyses)
-sig_pathways <- x %>%
-  filter(padj < sig_cutoff) %>% select(pathway) %>% distinct() %>% pull()
-x <- x %>%
-  filter(pathway %in% sig_pathways) %>%
-  arrange(desc(NES))
-
-# get leading edge genes
-leading_edge_genes <- summarise(x, result = unlist(leadingEdge, use.names=FALSE)) %>% distinct() %>% pull()
-
-# matrix genes (rows) vs pathways (columns)
-m <- matrix(data = 0, nrow=length(leading_edge_genes), ncol=nrow(x))
-m <- as.data.frame(m)
-rownames(m) <- leading_edge_genes
-colnames(m) <- x$pathway
-for (i in 1:nrow(x)) {
-  p <- x$pathway[i]
-  nes <- x$NES[i]
-  padj <- x$padj[i]
-  # if (padj >= 0.05) { next }
-  for (j in x$leadingEdge[i]) {
-    m[j, p] <- sign(nes)
-  }
-}
-
-# filter genes only found in a single pathway
-m <- m[rowSums(m) >= 2, ]
-# filter empty columns
-m <- m[, colSums(m) > 1]
-# order by number of pathways sharing the gene
-m <- m[order(rowSums(m), decreasing=TRUE),]
-m <- m[,order(colSums(m), decreasing=TRUE)]
+x <- gsea_merged %>% filter(analysis == "path_hgd_vs_lgd")
+m <- gsea_leading_edge_matrix(x, padj_cutoff)
 
 # annotate rows
-grade_subtypes <- grade_de_merged %>%
-  mutate(grade_subtype = case_when(de_path_pbhgd_vs_pblgd == "up" & de_path_inthgd_vs_intlgd == "up" ~ "hgd",
-                                   de_path_pbhgd_vs_pblgd == "dn" & de_path_inthgd_vs_intlgd == "dn" ~ "lgd",
-                                   de_path_pbhgd_vs_pblgd == "up" ~ "pbhgd",
-                                   de_path_inthgd_vs_intlgd == "up" ~ "inthgd",
-                                   de_path_pbhgd_vs_pblgd == "dn" ~ "pblgd",
-                                   de_path_inthgd_vs_intlgd == "dn" ~ "intlgd",
-                                   TRUE ~ "none")) %>%
-  select(gene, grade_subtype)
-
-annot_colors <- color_scales
-annot_colors$grade_subtype =  c(none = "#aaaaaa",
-                                hgd = "#ff0000",
-                                lgd = "#0000ff",
-                                pbhgd = "#32cd32",
-                                inthgd = "#670092",
-                                pblgd = "#1677c4",
-                                intlgd = "#ff6700")
-
 row_annot <- gene_annot %>%
-  left_join(grade_subtypes, by=c("gene_symbol" = "gene")) %>%
   filter(gene_symbol %in% rownames(m)) %>%
   select(gene_symbol, grade_subtype, prognostic, de_cptac_rna, de_cptac_prot) %>%
   column_to_rownames("gene_symbol") %>%
@@ -1744,12 +2024,79 @@ p <- pheatmap(m,
               clustering_distance_cols = "euclidean",
               clustering_method = "ward.D2",
               annotation_row = row_annot,
-              annotation_colors = annot_colors,
+              annotation_colors = color_scales,
               fontsize_col = 4,
               fontsize_row = 6)
 h <- 2 + nrow(m) / 6
 w <- 2 + ncol(m) / 2
-save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge.pdf"), width=w, height=h)
+save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_hallmark.pdf"), width=w, height=h)
+
+
+# GOBP leading edge
+gsea_merged <- gsea_gobp
+x <- gsea_merged %>% filter(analysis == "path_hgd_vs_lgd")
+m <- gsea_leading_edge_matrix(x, padj_cutoff)
+
+# annotate rows
+row_annot <- gene_annot %>%
+  filter(gene_symbol %in% rownames(m)) %>%
+  select(gene_symbol, grade_subtype, prognostic, de_cptac_rna, de_cptac_prot) %>%
+  column_to_rownames("gene_symbol") %>%
+  as.data.frame()
+
+p <- pheatmap(m, 
+              scale = "none",
+              color = colorRampPalette(c("blue", "white", "red"))(50),
+              breaks = seq(-1, 1, length.out=51),
+              cellwidth = 6,
+              cellheight = 6,
+              border_color = "black",
+              cluster_rows = TRUE,
+              cluster_cols = TRUE,
+              clustering_distance_rows = "euclidean",
+              clustering_distance_cols = "euclidean",
+              clustering_method = "ward.D2",
+              annotation_row = row_annot,
+              annotation_colors = color_scales,
+              fontsize_col = 4,
+              fontsize_row = 6)
+h <- 2 + nrow(m) / 6
+w <- 2 + ncol(m) / 2
+save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_gobp.pdf"), width=w, height=h)
+
+
+
+# GOBP leading edge
+gsea_merged <- bind_rows(gsea_hallmark, gsea_gobp)
+x <- gsea_merged %>% filter(analysis == "path_hgd_vs_lgd")
+m <- gsea_leading_edge_matrix(x, padj_cutoff)
+
+# annotate rows
+row_annot <- gene_annot %>%
+  filter(gene_symbol %in% rownames(m)) %>%
+  select(gene_symbol, grade_subtype, prognostic, de_cptac_rna, de_cptac_prot) %>%
+  column_to_rownames("gene_symbol") %>%
+  as.data.frame()
+
+p <- pheatmap(m, 
+              scale = "none",
+              color = colorRampPalette(c("blue", "white", "red"))(50),
+              breaks = seq(-1, 1, length.out=51),
+              cellwidth = 6,
+              cellheight = 6,
+              border_color = "black",
+              cluster_rows = TRUE,
+              cluster_cols = TRUE,
+              clustering_distance_rows = "euclidean",
+              clustering_distance_cols = "euclidean",
+              clustering_method = "ward.D2",
+              annotation_row = row_annot,
+              annotation_colors = color_scales,
+              fontsize_col = 4,
+              fontsize_row = 6)
+h <- 2 + nrow(m) / 6
+w <- 2 + ncol(m) / 2
+save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_merged.pdf"), width=w, height=h)
 
 
 #########################################################
@@ -1761,57 +2108,6 @@ x <- bind_rows(gsea_hallmark, gsea_gobp) %>%
   filter(padj < 0.01) %>% arrange(desc(NES))
 write_xlsx(list(gsea = x),
            file.path(working_dir, gsea_results_xlsx))
-
-# # enumerate founder gene sets of HALLMARK_TNF gene set
-# founder_gs <- pull(read.delim("founder_gs_tnf.txt"))
-# nrow(filter(x, pathway %in% founder_gs))
-# 
-# # merged de analyses
-# gsea_merged <- gsea %>%
-#   mutate(sig = padj < gsea_padj_cutoff)
-# gsea_merged <- select(gsea, pathway, padj, ES, NES, analysis) %>%
-#   pivot_wider(names_from = analysis, values_from = c(padj, ES, NES)) %>%
-#   mutate(nes_pb_vs_int = NES_path_pbhgd_vs_pblgd - NES_path_inthgd_vs_intlgd,
-#          hist = case_when(padj_path_pbhgd_vs_pblgd < gsea_padj_cutoff & padj_path_inthgd_vs_intlgd < gsea_padj_cutoff ~ "pbint",
-#                           padj_path_pbhgd_vs_pblgd < gsea_padj_cutoff ~ "pb",
-#                           padj_path_inthgd_vs_intlgd < gsea_padj_cutoff ~ "int",
-#                           TRUE ~ "none"))
-# gsea_merged %>%
-#   filter(padj_path_pbhgd_vs_pblgd < 0.01) %>%
-#   arrange(desc(nes_pb_vs_int)) %>%
-#   as.data.frame()
-# 
-# x <- gsea_merged
-# 
-# color_scale = c(none = "#888888",
-#                 pbint = "#FF0000",
-#                 pb = "#32cd32",
-#                 int = "#670092")
-# size_scale = c(none = 1,
-#                pbint = 2,
-#                pb = 2,
-#                int = 2)
-# 
-# label_pathways = c()
-# 
-# annot_data <- x %>%
-#   filter(hist != "none")
-# none_data <- x %>%
-#   filter(hist == "none")
-# sig_data <- x %>%
-#   filter(hist != "none")
-# 
-# p <- ggplot(gsea_merged, aes(x=NES_path_pbhgd_vs_pblgd, 
-#                              y=NES_path_inthgd_vs_intlgd,
-#                              color = hist,
-#                              size = hist)) +
-#   geom_point(data=none_data, alpha=0.2) + 
-#   geom_point(data=sig_data, alpha=0.8) +
-#   scale_color_manual(values = color_scale) +
-#   scale_size_manual(values = size_scale, guide = "none") +
-#   theme_minimal()
-# p
-
 
 #############################################################
 #
@@ -1925,12 +2221,6 @@ as.data.frame(filter(grade_de_merged, gene == "SERPINB5"))
 as.data.frame(filter(grade_de_merged, gene == "LAMB3"))
 as.data.frame(grade_de_merged %>% filter(gene == "SMAD4"))
 as.data.frame(grade_de_merged %>% filter(gene == "LIF"))
-
-filter(grade_de_merged, de_path_pbhgd_vs_lgd != "no") %>% select(gene) %>% pull()
-as.data.frame(filter(grade_de_merged, de_path_inthgd_vs_lgd != "no"))
-as.data.frame(filter(grade_de_merged, de_inthgd != "no"))
-colnames(grade_de_merged)
-
 
 #############################################################
 #
@@ -2050,17 +2340,17 @@ cor_result_to_edges <- function(cor_result, self=FALSE) {
 #
 nperms <- 10000
 cor_qval_cutoff <- 0.01
-cor_r_cutoff <- 0.6
+cor_r_cutoff <- 0.7
 cor_weight_beta <- 4
 graph_min_csize <- 10
-graph_clust_resolution <- 0.75
+graph_clust_resolution <- 0.25
 
 # panck self correlation
 panck_cor_mat <- norm_count_lcpm
 rownames(panck_cor_mat) <- paste0("panck_", rownames(norm_count_lcpm))
-panck_cor_res <- cor_compute(panck_cor_mat,
-                             panck_cor_mat,
-                             nperms)
+# panck_cor_res <- cor_compute(panck_cor_mat,
+#                              panck_cor_mat,
+#                              nperms)
 # saveRDS(panck_cor_res, file=file.path(working_dir, "cor_panck.rds"))
 panck_cor_res <- readRDS(file.path(working_dir, "cor_panck.rds"))
 
@@ -2080,13 +2370,15 @@ edges$weight <- abs(edges$cor) ** cor_weight_beta
 nodes <- bind_cols(label = rownames(panck_cor_mat),
                    orig_gene = rownames(norm_count_lcpm),
                    type = "panck",
-                   grade_subtype = grade_de_merged$subtype,
+                   grade_subtype = gene_annot$grade_subtype,
                    grade_log2fc = grade_de_merged$log2fc_path_hgd_vs_lgd,
                    grade_pb_log2fc = grade_de_merged$log2fc_path_pbhgd_vs_pblgd,
                    grade_int_log2fc = grade_de_merged$log2fc_path_inthgd_vs_intlgd,
                    grade_abs_log2fc = abs(grade_de_merged$log2fc_path_hgd_vs_lgd),
                    grade_abs_pb_log2fc = abs(grade_de_merged$log2fc_path_pbhgd_vs_pblgd),
-                   grade_abs_int_log2fc = abs(grade_de_merged$log2fc_path_inthgd_vs_intlgd))
+                   grade_abs_int_log2fc = abs(grade_de_merged$log2fc_path_inthgd_vs_intlgd),
+                   inthgd_scaled_mean = gene_annot$inthgd_scaled_mean,
+                   pbhgd_scaled_mean = gene_annot$pbhgd_scaled_mean)
 nodes$id <- nodes$label
 nodes$name <- nodes$id
 nodes <- mutate(nodes, 
@@ -2123,7 +2415,7 @@ ggplot(res, aes(x=r, y=n)) +
 # clustering/community detection
 clust <- cluster_leiden(g,
                         objective_function="modularity",
-                        resolution=0.50,
+                        resolution=0.5,
                         n_iterations=1000)
 graph_clust_resolution
 modularity(g, membership(clust))
@@ -2209,36 +2501,91 @@ plot(mg,
 #      vertex.size=2,
 #      vertex.label=NA)
 
+run_batch_enricher <- function(my_nodes, my_gs) {
+  seg <- "panck"
+  yy <- NULL
+  for (i in 1:length(unique(my_nodes$community))) {
+    x <- dplyr::filter(my_nodes, type == seg, community == i) %>% 
+      dplyr::select(orig_gene) %>% pull()
+    res <- enricher(gene = x,
+                    pvalueCutoff = 0.05,
+                    pAdjustMethod = "BH",
+                    universe = cta_genes,
+                    qvalueCutoff = 0.1,
+                    TERM2GENE = my_gs)
+    if (is.null(res)) { next }
+    y <- res@result
+    y$cluster_size <- length(res@gene)
+    y$community <- i
+    yy <- rbind(yy, y)
+  }
+  return(as_tibble(yy))
+}
+
+
 gs <- msigdb_gene_sets %>%
   filter(gs_cat == "H") %>%
   select(gs_name, gene_symbol)
+clust_hallmark <- run_batch_enricher(clust_nodes, gs)
+
 gs <- msigdb_gene_sets %>%
   dplyr::filter(gs_cat == "C5", gs_subcat == "GO:BP") %>%
   dplyr::select(gs_name, gene_symbol)
+clust_gobp <- run_batch_enricher(clust_nodes, gs)
+
+gs <- gmt_to_tbl(cptac_gs)
+clust_pdac <- run_batch_enricher(clust_nodes, gs)
 
 gs <- msigdb_gene_sets %>%
   dplyr::filter(gs_cat == "C7", gs_subcat == "IMMUNESIGDB") %>%
   dplyr::select(gs_name, gene_symbol)
+clust_immune <- run_batch_enricher(clust_nodes, gs)
 
 gs <- msigdb_gene_sets %>%
   dplyr::select(gs_name, gene_symbol)
+clust_all <- run_batch_enricher(clust_nodes, gs)
 
 
-gmt_to_tbl <- function(gmt) {
-  gs_to_tbl <- function(gs_name, gs_genes) {
-    bind_cols(gs_name = rep(gs_name, length(gs_genes)),
-              gene_symbol = gs_genes)
-  }
-  tbl <- NULL
-  for (i in 1:length(gmt)) {
-    tbl <- bind_rows(tbl, gs_to_tbl(names(gmt)[i], gmt[[i]]))
-  }
-  return(tbl)
-}
+x <- clust_all
+x <- x %>% filter(p.adjust < 0.05, cluster_size >= 10) %>% select(ID, GeneRatio, p.adjust, cluster_size, community)
+x %>% as.data.frame()
+x %>% filter(community == 5) %>% as.data.frame()
 
-gs <- gmt_to_tbl(cptac_gs)
+x <- clust_hallmark
+x <- x %>% filter(p.adjust < 0.05, cluster_size >= 10) %>% select(ID, GeneRatio, p.adjust, Count, cluster_size, community)
+x %>% filter(community == 10) %>% as.data.frame()
+x <- x %>% as.data.frame()
+
+x <- clust_gobp
+x <- x %>% filter(p.adjust < 0.05, cluster_size >= 10) %>% select(ID, GeneRatio, p.adjust, Count, cluster_size, community)
+x %>% filter(community == 10) %>% as.data.frame()
+x <- x %>% as.data.frame()
+
+x <- clust_pdac
+x <- x %>% filter(p.adjust < 0.05, cluster_size >= 10) %>% select(ID, GeneRatio, p.adjust, Count, cluster_size, community)
+x %>% as.data.frame()
+
+
+
+gs <- msigdb_gene_sets %>%
+  dplyr::filter(gs_cat == "C7", gs_subcat == "IMMUNESIGDB") %>%
+  dplyr::select(gs_name, gene_symbol)
+gs <- msigdb_gene_sets %>%
+  dplyr::select(gs_name, gene_symbol)
 gs <- gmt_to_tbl(gmtPathways(gs_wikipathways_file))
 gs <- gmt_to_tbl(gmtPathways(gs_reactome_file))
+gs <- gmt_to_tbl(gmtPathways(gs_wikipathways_file))
+gs <- gmt_to_tbl(gmtPathways(gs_reactome_file))
+
+
+
+
+colnames(x)
+print(x)
+x$community
+x[[3]]
+x[[4]]
+bind_rows(as.data.frame(x[[3]]), as.data.frame(x[[4]]))
 
 
 
@@ -2260,10 +2607,21 @@ for (i in 1:length(unique(clust_nodes$community))) {
   }
 }
 
+
 yy
 
-enrichplot::dotplot(yy[[3]])
-enrichplot::dotplot(yy[[3]], showCategory = 3, font.size = 6)
+
+yy[[3]]@result
+head(yy[[3]])
+str(yy[[1]])
+str(yy[[3]])
+
+
+
+barplot(yy[[7]])
+enrichplot::barplot.enrichResult
+enrichplot::dotplot(yy[[10]])
+enrichplot::dotplot(yy[[2]], showCategory = 3, font.size = 6)
 
 
 str(yy)
