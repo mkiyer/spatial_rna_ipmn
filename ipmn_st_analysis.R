@@ -29,7 +29,7 @@ working_dir = "~/OneDrive - Duke University/research/projects/st_ipmn/current"
 data_dir = "~/OneDrive - Duke University/research/projects/st_ipmn/data"
 
 # spatial rna input file
-input_xlsx_file = file.path(data_dir, "ipmn_counts_annot_2022-06-22.xlsx")
+input_xlsx_file = file.path(data_dir, "ipmn_counts_manuscript_2022-07-17.xlsx")
 # spatial rna sheet names
 metadata_sheet <- "SegmentProperties"
 metadata_id_key <- "SegmentDisplayName"
@@ -92,14 +92,9 @@ de_result_dir <- file.path(working_dir, "de_results")
 if (!dir.exists(de_result_dir)) {
   dir.create(de_result_dir)
 }
-cor_clust_dir <- file.path(working_dir, "cor_clust")
-if (!dir.exists(cor_clust_dir)) {
-  dir.create(cor_clust_dir)
-}
 
 get_color_scales <- function(slide_ids) {
   color_scales = list(
-    region = c(epithelia="#00203f", stroma="#adefd1"),
     path = c(lgd="#AAAAAA", hgd="#DD0000"),
     pathbw = c(lgd="#cccccc", hgd="#333333"),
     histology = c(pb = "#32cd32", intestinal = "#670092", gf="#1677c4"),
@@ -111,10 +106,9 @@ get_color_scales <- function(slide_ids) {
     #              cd45_pblgd="#fff192", cd45_pbhgd="#ffd400",
     #              sma_intlgd="#ff9090", sma_inthgd="#ec0000",
     #              sma_pblgd="#ffddb3", sma_pbhgd="#ff8c00"),
-    hgd_histology = c(pb = "#32cd32", intestinal = "#670092"),
     carcinoma = c(no = "#666666", yes = "#ff0000"),
     auc_quant = c("1"="#0000ff", "2"="#00ff00", "3"="#ff0000"),
-    prognostic=c(no="#aaaaaa", fav="#00FFFF", unfav="#FFFF00"),
+    prognostic = c(no="#aaaaaa", fav="#00FFFF", unfav="#FFFF00"),
     de_cptac_rna = c(no="#aaaaaa", dn="#00FFFF", up="#FFFF00", na="#FFFFFF"), 
     de_cptac_prot = c(no="#aaaaaa", dn="#00FFFF", up="#FFFF00", na="#FFFFFF"),
     grade_subtype = c(none = "#888888", hgd = "#FF0000", lgd = "#0000FF", pbhgd = "#32cd32",
@@ -324,7 +318,6 @@ samples$slide_id <- factor(samples$slide_id)
 samples$aoi_id <- factor(samples$aoi_id)
 samples$path <- factor(samples$path, levels=c("lgd", "hgd"))
 samples$histology <- factor(samples$histology)
-samples$hgd_histology <- factor(samples$hgd_histology)
 samples$carcinoma <- factor(samples$carcinoma)
 samples$histpath <- factor(samples$histpath)
 samples$roi_group <- factor(samples$roi_group)
@@ -554,8 +547,8 @@ oncotarget_data <- oncotarget_data %>% filter(gene_symbol %in% cta_genes)
 oncotarget_data <- oncotarget_data %>% filter(abs(log_ratio) > 1, fdr < 0.01)
 oncotarget_up <- oncotarget_data %>% filter(log_ratio > 0) %>% pull(gene_symbol)
 oncotarget_dn <- oncotarget_data %>% filter(log_ratio < 0) %>% pull(gene_symbol)
-oncotarget_gs <- list("LI_PDAC_RNA_UP" = oncotarget_up,
-                      "LI_PDAC_RNA_DN" = oncotarget_dn)
+oncotarget_gs <- list("MAO_ONCOTARGET_PDAC_RNA_UP" = oncotarget_up,
+                      "MAO_ONCOTARGET_PDAC_RNA_DN" = oncotarget_dn)
 
 gene_annot <- gene_meta %>%
   left_join(hpa_pdac, by=c("gene_symbol"="gene_symbol")) %>%
@@ -651,23 +644,8 @@ p
 f <- file.path(plot_dir, "scatter_counts_vs_auc_bysegment.pdf")
 ggsave(f, plot=p, device="pdf", width = 4, height = 3)
 
-# figure: boxplot path versus nuclei count by slide
-p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=AOINucleiCount)) +
-  geom_boxplot(aes(fill=path), outlier.shape=NA) +
-  geom_point(aes(fill=path), color="black", size=2, position=position_jitterdodge(jitter.width=0.15)) +
-  scale_fill_manual(values=color_scales$path) +
-  scale_color_manual(values=color_scales$path) +
-  xlab("Pathology") +
-  ylab("Nuclei Count") +
-  labs(fill = "Pathology") +
-  theme_minimal() +
-  theme(legend.position="bottom")
-  facet_grid(cols = vars(slide_id)) 
-p
-f <- file.path(plot_dir, "boxplot_path_vs_nuclei_byslide.pdf")
-ggsave(f, plot=p, device="pdf", width = 8, height = 4)
 
-# figure: boxplot path versus total counts by slide
+# figure: boxplot path versus total counts
 p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=num_counts)) +
   geom_boxplot(aes(fill=path), width=0.5, outlier.shape=NA) +
   geom_point(aes(fill=path), color="black", size=2, position=position_jitterdodge(jitter.width=0.15)) +
@@ -682,11 +660,10 @@ p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=num_counts)) +
   #facet_grid(cols = vars(slide_id)) 
 p
 f <- file.path(plot_dir, "boxplot_path_vs_counts.pdf")
-ggsave(f, plot=p, device="pdf", width = 3, height = 3)
+ggsave(f, plot=p, device="pdf", width = 2, height = 3)
 
 # figure: boxplot path versus auc
 p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=auc)) +
-  #geom_violin(aes(fill=path), trim=FALSE) +
   geom_boxplot(aes(fill=path), width=0.5, outlier.shape=NA) +
   geom_point(aes(fill=path), color="black", size=2, position=position_jitterdodge(jitter.width=0.15)) +
   scale_y_continuous(trans="log10") +
@@ -700,23 +677,76 @@ p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=auc)) +
   #facet_grid(cols = vars(slide_id)) 
 p
 f <- file.path(plot_dir, "boxplot_path_vs_auc.pdf")
-ggsave(f, plot=p, device="pdf", width = 3, height = 3)
+ggsave(f, plot=p, device="pdf", width = 2, height = 3)
 
-# figure: boxplot path versus auc by slide
-p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=auc)) +
-  geom_boxplot(aes(fill=path), outlier.shape=NA) +
+# figure: boxplot path versus aoi density
+p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=path, y=100 * AOINucleiCount / AOISurfaceArea)) +
+  geom_boxplot(aes(fill=path), width=0.5, outlier.shape=NA) +
   geom_point(aes(fill=path), color="black", size=2, position=position_jitterdodge(jitter.width=0.15)) +
   scale_y_continuous(trans="log10") +
   scale_fill_manual(values=color_scales$path) +
   scale_color_manual(values=color_scales$path) +
   xlab("Pathology") +
-  ylab("snAUC") +
+  ylab("AOI Density (Nuclei / 100um2)") +
   labs(fill = "Pathology") +
-  theme(legend.position="bottom") +
-  facet_grid(cols = vars(slide_id)) 
+  theme_minimal() +
+  theme(legend.position="bottom")
+#facet_grid(cols = vars(slide_id)) 
 p
-f <- file.path(plot_dir, "boxplot_path_vs_auc_byslide.pdf")
-ggsave(f, plot=p, device="pdf", width = 8, height = 4)
+f <- file.path(plot_dir, "boxplot_path_vs_aoi_density.pdf")
+ggsave(f, plot=p, device="pdf", width = 2, height = 3)
+
+
+# figure: boxplot histology versus aoi density
+p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=histology, y=100 * AOINucleiCount / AOISurfaceArea)) +
+  geom_boxplot(aes(fill=histology), width=0.5, outlier.shape=NA) +
+  geom_point(aes(fill=histology), color="black", size=2, position=position_jitterdodge(jitter.width=0.15)) +
+  scale_y_continuous(trans="log10") +
+  scale_fill_manual(values=color_scales$histology) +
+  scale_color_manual(values=color_scales$histology) +
+  xlab("Pathology") +
+  ylab("AOI Density (Nuclei / 100um2)") +
+  labs(fill = "Pathology") +
+  theme_minimal() +
+  theme(legend.position="bottom")
+p
+f <- file.path(plot_dir, "boxplot_histology_vs_aoidensity.pdf")
+ggsave(f, plot=p, device="pdf", width = 2, height = 3)
+
+
+# figure: boxplot histology versus total counts
+p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=histology, y=num_counts)) +
+  geom_boxplot(aes(fill=histology), width=0.5, outlier.shape=NA) +
+  geom_point(aes(fill=histology), color="black", size=2, position=position_jitterdodge(jitter.width=0.15)) +
+  scale_y_continuous(trans="log10") +
+  scale_fill_manual(values=color_scales$histology) +
+  scale_color_manual(values=color_scales$histology) +
+  xlab("Histology") +
+  ylab("Total Counts") +
+  labs(fill = "Histology") +
+  theme_minimal() +
+  theme(legend.position="bottom")
+p
+f <- file.path(plot_dir, "boxplot_histology_vs_counts.pdf")
+ggsave(f, plot=p, device="pdf", width = 2, height = 3)
+
+# figure: boxplot histology versus auc
+p <- ggplot(filter(fmetadata, segment == "panck"), aes(x=histology, y=auc)) +
+  geom_boxplot(aes(fill=histology), width=0.5, outlier.shape=NA) +
+  geom_point(aes(fill=histology), color="black", size=2, position=position_jitterdodge(jitter.width=0.15)) +
+  scale_y_continuous(trans="log10") +
+  scale_fill_manual(values=color_scales$histology) +
+  scale_color_manual(values=color_scales$histology) +
+  xlab("Histology") +
+  ylab("snAUC") +
+  labs(fill = "Histology") +
+  theme_minimal() +
+  theme(legend.position="bottom")
+#facet_grid(cols = vars(slide_id)) 
+p
+f <- file.path(plot_dir, "boxplot_histology_vs_auc.pdf")
+ggsave(f, plot=p, device="pdf", width = 2, height = 3)
+
 
 # figure: gene filtering fraction expressed cutoff
 p <- ggplot(filter(counts_probe, probe_type == 1), aes(x=frac_expr)) +
@@ -1095,8 +1125,6 @@ colnames(design)
 colnames(design) <- levels(samples$histpath)
 colnames(design)
 contrasts = makeContrasts(path_hgd_vs_lgd = (panck_pbhgd + panck_inthgd)/2 - (panck_intlgd + panck_pblgd)/2,
-                          path_inthgd_vs_lgd = panck_inthgd - (panck_pblgd + panck_intlgd)/2,
-                          path_pbhgd_vs_lgd = panck_pbhgd - (panck_pblgd + panck_intlgd)/2,
                           path_pbhgd_vs_intlgd = panck_pbhgd - panck_intlgd,
                           path_pbhgd_vs_pblgd = panck_pbhgd - panck_pblgd,
                           path_inthgd_vs_intlgd = panck_inthgd - panck_intlgd,
@@ -1364,6 +1392,8 @@ ggsave(f, plot=p, device="pdf", width=5, height=5)
 # Pathology plot
 #
 x <- grade_de_merged
+nrow(grade_de_merged %>% filter(subtype != "none"))
+table(grade_de_merged$subtype)
 
 color_scale = c(none = "#888888",
                 hgd = "#FF0000",
@@ -1473,6 +1503,29 @@ f <- file.path(plot_dir, "scatter_de_histology.pdf")
 ggsave(f, plot=p, device="pdf", width=8, height=8)
 
 
+
+
+#
+# PB plot
+#
+p <- ggplot(x, aes(x=log2fc_hist_pb_vs_gf, 
+                   y=log2fc_hist_pb_vs_int,
+                   color=subtype, 
+                   size=subtype)) +
+  geom_point(data=none_data, alpha=0.4) + 
+  geom_point(data=annot_data, alpha=0.8) +
+  geom_text_repel(data=label_data, color="black", size=3, aes(label=gene), max.overlaps=Inf) +
+  scale_color_manual(values = color_scale) +
+  scale_size_manual(values = size_scale, guide = "none") +
+  theme_minimal() +
+  xlab("log2(Fold Change) PB vs GF") +
+  ylab("log2(Fold Change) PB vs INT") +
+  labs(color = "Subtype")
+p
+f <- file.path(plot_dir, "scatter_de_pb.pdf")
+ggsave(f, plot=p, device="pdf", width=8, height=8)
+
+
 ##################################################
 #
 #
@@ -1563,6 +1616,8 @@ p <- plot_hist_boxplot(samples, x, "CLU")
 ggsave(file.path(plot_dir, "hist_boxplot_clu.pdf"), p, width=3, height=5)
 p <- plot_hist_boxplot(samples, x, "RBP4")
 ggsave(file.path(plot_dir, "hist_boxplot_rbp4.pdf"), p, width=3, height=5)
+p <- plot_hist_boxplot(samples, x, "KRT17")
+ggsave(file.path(plot_dir, "hist_boxplot_krt17.pdf"), p, width=3, height=5)
 
 
 p <- plot_hgd_boxplot(samples, x, "FOSL1")
@@ -1583,6 +1638,8 @@ ggsave(file.path(plot_dir, "grade_boxplot_smad4.pdf"), p, width=3, height=4)
 
 plot_grade_boxplot(samples, x, "SMAD4")
 plot_grade_boxplot(samples, x, "CEACAM6")
+plot_grade_boxplot(samples, x, "CD55")
+grade_de_merged %>% filter(gene == "CD55") %>% as.data.frame()
 
 # lymphocyte marker
 plot_grade_boxplot(samples, x, "PTPRC")
@@ -1622,8 +1679,15 @@ plot_grade_boxplot(samples, x, "TOP2A")
 plot_grade_boxplot(samples, x, "CENPF")
 plot_grade_boxplot(samples, x, "UBE2C")
 
+plot_grade_boxplot(samples, x, "KRT17")
+plot_grade_boxplot(samples, x, "KRT6B")
 plot_grade_boxplot(samples, x, "CXCL8")
+plot_grade_boxplot(samples, x, "ITGA2")
+plot_grade_boxplot(samples, x, "LAMC2")
 plot_grade_boxplot(samples, x, "LAMB3")
+plot_grade_boxplot(samples, x, "EPHA2")
+plot_grade_boxplot(samples, x, "AREG")
+
 plot_grade_boxplot(samples, x, "LIF")
 plot_grade_boxplot(samples, x, "CXCL5")
 plot_grade_boxplot(samples, x, "CLU")
@@ -1631,12 +1695,24 @@ plot_grade_boxplot(samples, x, "RBP4")
 plot_grade_boxplot(samples, x, "SMAD4")
 plot_grade_boxplot(samples, x, "CEACAM6")
 plot_grade_boxplot(samples, x, "CXCL14")
+plot_grade_boxplot(samples, x, "IL33")
+plot_grade_boxplot(samples, x, "HMGA2")
+plot_grade_boxplot(samples, x, "CD55")
+grade_de_merged %>% filter(gene == "CEACAM6") %>% as.data.frame()
+
+plot_grade_boxplot(samples, x, "ATOH1")
 
 grade_de_merged %>% filter(gene == "CEACAM6") %>% as.data.frame()
 hist_de_merged %>% filter(gene == "SMAD4") %>% as.data.frame()
 
 grade_de_merged %>% filter(gene == "POU5F1") %>% as.data.frame()
 table(samples$histpath, samples$histology)
+
+nrow(grade_de_merged %>% filter(de_path_pbhgd_vs_pblgd == "up"))
+nrow(grade_de_merged %>% filter(de_path_pbhgd_vs_pblgd == "dn"))
+nrow(grade_de_merged %>% filter(de_path_inthgd_vs_intlgd == "up"))
+nrow(grade_de_merged %>% filter(de_path_inthgd_vs_intlgd == "dn"))
+
 
 ##################################################
 #
@@ -2343,7 +2419,7 @@ cor_qval_cutoff <- 0.01
 cor_r_cutoff <- 0.7
 cor_weight_beta <- 4
 graph_min_csize <- 10
-graph_clust_resolution <- 0.25
+graph_clust_resolution <- 0.50
 
 # panck self correlation
 panck_cor_mat <- norm_count_lcpm
@@ -2415,7 +2491,7 @@ ggplot(res, aes(x=r, y=n)) +
 # clustering/community detection
 clust <- cluster_leiden(g,
                         objective_function="modularity",
-                        resolution=0.5,
+                        resolution=graph_clust_resolution,
                         n_iterations=1000)
 graph_clust_resolution
 modularity(g, membership(clust))
@@ -2528,13 +2604,40 @@ gs <- msigdb_gene_sets %>%
   select(gs_name, gene_symbol)
 clust_hallmark <- run_batch_enricher(clust_nodes, gs)
 
+clust_hallmark %>% arrange(p.adjust) %>% as.data.frame.table()
+clust_nodes %>% filter(community == 4) %>% as.data.frame.table()
+
 gs <- msigdb_gene_sets %>%
   dplyr::filter(gs_cat == "C5", gs_subcat == "GO:BP") %>%
   dplyr::select(gs_name, gene_symbol)
 clust_gobp <- run_batch_enricher(clust_nodes, gs)
 
+clust_gobp %>% arrange(p.adjust) %>% as.data.frame()
+table(clust_nodes %>% filter(community == 4) %>% pull(orig_gene) %in% hgd_up)
+table(clust_nodes %>% filter(community == 7) %>% pull(orig_gene) %in% hgd_up)
+
+colnames(grade_de_merged)
+x <- grade_de_merged %>% filter(de_path_inthgd_vs_pblgd == "up") %>% pull(gene)
+x <- grade_de_merged %>% filter(de_path_inthgd_vs_intlgd == "up") %>% pull(gene)
+x <- grade_de_merged %>% filter(de_path_pbhgd_vs_pblgd == "up") %>% pull(gene)
+x <- grade_de_merged %>% filter(de_path_hgd_vs_lgd == "up") %>% pull(gene)
+x
+x <- hist_de_merged %>% filter(de_hist_int_vs_gf == "up") %>% pull(gene)
+x <- hist_de_merged %>% filter(de_hist_pb_vs_gf == "up") %>% pull(gene)
+x <- hist_de_merged %>% filter(de_hist_gf == "dn") %>% pull(gene)
+x
+
+y <- intersect(clust_nodes %>% filter(community == 4) %>% pull(orig_gene), x)
+
+table(clust_nodes %>% filter(community == 7) %>% pull(orig_gene) %in% x)
+
+
+gs <- gmt_to_tbl(gs_pdac)
 gs <- gmt_to_tbl(cptac_gs)
 clust_pdac <- run_batch_enricher(clust_nodes, gs)
+
+clust_pdac %>% arrange(p.adjust) %>% as.data.frame()
+
 
 gs <- msigdb_gene_sets %>%
   dplyr::filter(gs_cat == "C7", gs_subcat == "IMMUNESIGDB") %>%
@@ -2553,15 +2656,16 @@ x %>% filter(community == 5) %>% as.data.frame()
 
 x <- clust_hallmark
 x <- x %>% filter(p.adjust < 0.05, cluster_size >= 10) %>% select(ID, GeneRatio, p.adjust, Count, cluster_size, community)
-x %>% filter(community == 10) %>% as.data.frame()
+x %>% filter(community == 4) %>% arrange(p.adjust) %>% as.data.frame()
 x <- x %>% as.data.frame()
 
 x <- clust_gobp
 x <- x %>% filter(p.adjust < 0.05, cluster_size >= 10) %>% select(ID, GeneRatio, p.adjust, Count, cluster_size, community)
-x %>% filter(community == 10) %>% as.data.frame()
-x <- x %>% as.data.frame()
+x %>% filter(community == 7) %>% arrange(p.adjust) %>% as.data.frame()
+x %>% as.data.frame()
 
 x <- clust_pdac
+x %>% arrange(p.adjust) %>% as.data.frame()
 x <- x %>% filter(p.adjust < 0.05, cluster_size >= 10) %>% select(ID, GeneRatio, p.adjust, Count, cluster_size, community)
 x %>% as.data.frame()
 
@@ -2580,13 +2684,17 @@ gs <- gmt_to_tbl(gmtPathways(gs_reactome_file))
 
 
 
+sum(table(clust_nodes$community) > 10)
+
+nrow(clust_nodes)
+nrow(clust_edges)
 colnames(x)
 print(x)
 x$community
 x[[3]]
 x[[4]]
 bind_rows(as.data.frame(x[[3]]), as.data.frame(x[[4]]))
-
+table(metadata$histology)
 
 
 seg <- "panck"
