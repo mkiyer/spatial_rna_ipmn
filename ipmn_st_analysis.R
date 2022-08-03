@@ -2626,9 +2626,19 @@ x <- hist_de_merged %>% filter(de_hist_int_vs_gf == "up") %>% pull(gene)
 x <- hist_de_merged %>% filter(de_hist_pb_vs_gf == "up") %>% pull(gene)
 x <- hist_de_merged %>% filter(de_hist_gf == "dn") %>% pull(gene)
 x
+nrow(metadata)
+intersect(clust_nodes %>% filter(community == 7) %>% pull(orig_gene), x)
+length(intersect(clust_nodes %>% filter(community == 7) %>% pull(orig_gene), x))
 
+intersect(x, y)
+z <- intersect(clust_nodes %>% filter(community == 4) %>% pull(orig_gene), x)
 y <- intersect(clust_nodes %>% filter(community == 4) %>% pull(orig_gene), x)
-
+z
+y
+length(union(z, y))
+length(intersect(z, y))
+setdiff(y, z)
+setdiff(z, y)
 table(clust_nodes %>% filter(community == 7) %>% pull(orig_gene) %in% x)
 
 
