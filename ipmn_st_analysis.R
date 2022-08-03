@@ -36,12 +36,9 @@ metadata_id_key <- "SegmentDisplayName"
 count_data_sheet <- "BioProbeCountMatrix"
 
 # external resource files
-msigdb_symbol_file <- file.path(data_dir, "msigdb.v7.5.1.symbols.gmt")
 hpa_path_file <- file.path(data_dir, "hpa_pathology.tsv")
 cptac_panc_file <- file.path(data_dir, "cptac_panc_supp_mmc3.xlsx")
 oncotarget_panc_file <- file.path(data_dir, "oncotarget-08-42537-s002.xlsx")
-gs_wikipathways_file <- file.path(data_dir, "WikiPathways_2019_Human.txt")
-gs_reactome_file <- file.path(data_dir, "Reactome_2016.txt")
 
 # segments included
 analysis_segments = c("panck")
@@ -54,7 +51,6 @@ qc_min_negprobe_geomean = 1
 qc_min_frac_expr = 0.2
 
 # de params
-de_norm_method = "RLE"
 de_padj_cutoff = 0.05
 de_log2fc_cutoff = 1.0
 
@@ -65,10 +61,10 @@ gsea_log2fc_cutoff <- 1
 # output files
 processed_xlsx_file <- "processed_data.xlsx"
 tsne_results_xlsx_file <- "tsne_allgenes.xlsx"
-de_results_hist_xlsx <- "de_results_hist.xlsx"
-de_results_grade_xlsx <- "de_results_grade.xlsx"
+de_results_xlsx <- "de_results.xlsx"
 gsea_results_xlsx <- "gsea_results.xlsx"
 cta_bg_gene_symbols_txt <- "cta_gene_symbols.txt"
+community_enrichment_xlsx <- "community_enrichment.xlsx"
 
 # output directories
 if (!dir.exists(working_dir)) {
@@ -100,14 +96,7 @@ get_color_scales <- function(slide_ids) {
     histology = c(pb = "#32cd32", intestinal = "#670092", gf="#1677c4"),
     histpath = c(panck_intlgd="#f0ceff", panck_inthgd="#b042ff", 
                  panck_pblgd="#1677c4", panck_pbhgd="#00ab08"),
-    # histpath = c(panck_intlgd="#f0ceff", panck_inthgd="#b042ff", 
-    #              panck_pblgd="#9df985", panck_pbhgd="#00ab08",
-    #              cd45_intlgd="#86c3fa", cd45_inthgd="#1750ac",
-    #              cd45_pblgd="#fff192", cd45_pbhgd="#ffd400",
-    #              sma_intlgd="#ff9090", sma_inthgd="#ec0000",
-    #              sma_pblgd="#ffddb3", sma_pbhgd="#ff8c00"),
     carcinoma = c(no = "#666666", yes = "#ff0000"),
-    auc_quant = c("1"="#0000ff", "2"="#00ff00", "3"="#ff0000"),
     prognostic = c(no="#aaaaaa", fav="#00FFFF", unfav="#FFFF00"),
     de_cptac_rna = c(no="#aaaaaa", dn="#00FFFF", up="#FFFF00", na="#FFFFFF"), 
     de_cptac_prot = c(no="#aaaaaa", dn="#00FFFF", up="#FFFF00", na="#FFFFFF"),
@@ -394,26 +383,6 @@ gene_bgsub_qnorm_dgelist <- DGEList(counts = gene_bgsub_qnorm_cpm,
 gene_bgsub_qnorm_lcpm <- log2(gene_bgsub_qnorm_cpm)
 
 #
-# bgsub scale normalization
-#
-probe_bgsub_counts <- get_bgsub_counts(fcounts_probe, samples)
-gene_bgsub_counts <- merge_probes_to_genes(probe_bgsub_counts, samples$aoi_id)
-# exclude metadata
-gene_bgsub_counts <- select(gene_bgsub_counts, gene_symbol, all_of(samples$aoi_id)) %>%
-  column_to_rownames("gene_symbol")
-
-# voom
-y <- DGEList(counts = gene_bgsub_counts,
-             samples = samples,
-             genes = gene_meta)
-y <- calcNormFactors(y, method = de_norm_method)
-v <- voom(y, plot=TRUE)
-gene_bgsub_dgelist <- y
-gene_bgsub_voom <- v
-gene_bgsub_voom_lcpm <- v$E
-
-
-#
 # write processed data
 #
 write_xlsx(
@@ -422,8 +391,7 @@ write_xlsx(
        unfiltered_counts_negprobe = counts_negprobe,
        metadata = fmetadata,
        gene_meta = gene_meta,
-       gene_bgsub_qnorm_lcpm = as_tibble(gene_bgsub_qnorm_lcpm, rownames="gene_symbol"),
-       gene_bgsub_voom_lcpm = as_tibble(gene_bgsub_voom_lcpm, rownames="gene_symbol")),
+       gene_expr_norm_log2 = as_tibble(gene_bgsub_qnorm_lcpm, rownames="gene_symbol")),
   file.path(working_dir, processed_xlsx_file)
 )
 
@@ -435,10 +403,6 @@ write_xlsx(
 
 norm_count_dgelist <- gene_bgsub_qnorm_dgelist
 norm_count_lcpm <- gene_bgsub_qnorm_lcpm
-# norm_count_dgelist <- gene_bgsub_dgelist
-# norm_count_voom <- gene_bgsub_voom
-# norm_count_lcpm <- gene_bgsub_voom_lcpm
-
 
 ##################################################
 #
@@ -797,19 +761,6 @@ x <- x %>%
   pivot_longer(samples$aoi_id, names_to="aoi_id", values_to="count") %>%
   inner_join(y, by=c("aoi_id"="aoi_id"))
 
-# scale
-# x <- get_bgsub_counts(counts_probe, samples)
-# x <- DGEList(counts = select(x, samples$aoi_id), 
-#              samples = samples, 
-#              genes = select(x, -samples$aoi_id))
-# x <- calcNormFactors(x, method = de_norm_method)
-# v <- voom(x)
-# x <- bind_cols(x$genes, v$E)
-# y <- select(samples, aoi_id, slide_id, segment, histology, path)
-# x <- x %>%
-#   pivot_longer(samples$aoi_id, names_to="aoi_id", values_to="count") %>%
-#   inner_join(y, by=c("aoi_id"="aoi_id"))
-
 # by aoi
 p <- x %>%
   ggplot(aes(x=count, y=factor(aoi_id), fill=factor(expressed))) +
@@ -940,8 +891,8 @@ run_pca <- function(x, meta) {
 y <- norm_count_lcpm
 pca_res <- run_pca(y, samples)
 pca_tbl <- pca_res$tbl
-tsne_res <- run_tsne(y, samples, perp=11)
-tsne_tbl <- tsne_res$tbl
+# tsne_res <- run_tsne(y, samples, perp=11)
+# tsne_tbl <- tsne_res$tbl
 #write_xlsx(tsne_tbl, file.path(working_dir, tsne_results_xlsx_file))
 tsne_tbl <- read_xlsx(file.path(working_dir, tsne_results_xlsx_file), sheet = "Sheet1")
 
@@ -1088,12 +1039,6 @@ x <- limmaRun(gene_bgsub_qnorm_lcpm, design, contrasts, trend=TRUE)
 res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
 hist_de <- res
 
-# # scale (voom)
-# method <- "limma_voom"
-# x <- limmaRun(gene_bgsub_voom, design, contrasts)
-# res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
-# hist_de <- res
-
 # merged de analyses
 hist_de_merged <- select(hist_de, gene, analysis, avgexpr, log2fc, padj, de) %>%
   pivot_wider(names_from = analysis, values_from = c(log2fc, padj, de))
@@ -1109,12 +1054,6 @@ hist_de_merged <- hist_de_merged %>%
 table(hist_de_merged$subtype)
 nrow(filter(hist_de_merged, subtype != "none"))
 
-# write results
-write_xlsx(list(samples = samples,
-                gene_meta = gene_meta,
-                de = hist_de,
-                merged_de = hist_de_merged),
-           file.path(working_dir, de_results_hist_xlsx))
 
 #
 # grade
@@ -1139,12 +1078,6 @@ x <- limmaRun(gene_bgsub_qnorm_lcpm, design, contrasts, trend=TRUE)
 res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
 grade_de <- res
 
-# # scale (voom)
-# method <- "limma_voom"
-# x <- limmaRun(gene_bgsub_voom, design, contrasts)
-# res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
-# grade_de <- res
-
 # merged de analyses
 grade_de_merged <- select(grade_de, gene, analysis, avgexpr, log2fc, padj, de) %>%
   pivot_wider(names_from = analysis, values_from = c(log2fc, padj, de))
@@ -1160,19 +1093,21 @@ grade_de_merged <- grade_de_merged %>%
   )
 table(grade_de_merged$subtype)
 
-
-# write gene expression data
-write_xlsx(list(samples = samples,
-                gene_meta = gene_meta,
-                de = grade_de,
-                merged_de = grade_de_merged),
-           file.path(working_dir, de_results_grade_xlsx))
-
 # add to gene annotation
 gene_annot <- gene_annot %>%
   left_join(select(grade_de_merged, gene, grade_subtype = subtype), by=c("gene_symbol"="gene")) %>%
   left_join(select(hist_de_merged, gene, hist_subtype = subtype), by=c("gene_symbol"="gene"))
 colnames(gene_annot)
+
+
+# write gene expression data
+write_xlsx(list(samples = samples,
+                gene_meta = gene_meta,
+                gene_annot = gene_annot,
+                de = bind_rows(hist_de, grade_de),
+                hist_de_merged = hist_de_merged,
+                grade_de_merged = grade_de_merged),
+           file.path(working_dir, de_results_xlsx))
 
 ##################################################
 #
@@ -1698,20 +1633,6 @@ plot_grade_boxplot(samples, x, "CXCL14")
 plot_grade_boxplot(samples, x, "IL33")
 plot_grade_boxplot(samples, x, "HMGA2")
 plot_grade_boxplot(samples, x, "CD55")
-grade_de_merged %>% filter(gene == "CEACAM6") %>% as.data.frame()
-
-plot_grade_boxplot(samples, x, "ATOH1")
-
-grade_de_merged %>% filter(gene == "CEACAM6") %>% as.data.frame()
-hist_de_merged %>% filter(gene == "SMAD4") %>% as.data.frame()
-
-grade_de_merged %>% filter(gene == "POU5F1") %>% as.data.frame()
-table(samples$histpath, samples$histology)
-
-nrow(grade_de_merged %>% filter(de_path_pbhgd_vs_pblgd == "up"))
-nrow(grade_de_merged %>% filter(de_path_pbhgd_vs_pblgd == "dn"))
-nrow(grade_de_merged %>% filter(de_path_inthgd_vs_intlgd == "up"))
-nrow(grade_de_merged %>% filter(de_path_inthgd_vs_intlgd == "dn"))
 
 
 ##################################################
@@ -1738,7 +1659,7 @@ run_batch_fgsea <- function(my_analyses, my_de, my_gs, my_prefix, my_plot_dir, m
     res <- fgsea(pathways = my_gs, stats = ranks, minSize = 10, eps = 0, nPermSimple = 10000)
     res <- mutate(res, analysis = a)
     gsea <- bind_rows(gsea, res)
-    
+    print(a)
     for (i in 1:nrow(res)) {
       x <- res[i,]
       if (x$padj >= my_padj_cutoff) { next }
@@ -1873,10 +1794,6 @@ gs_hallmark <- filter(msigdb_gene_sets, gs_cat == "H")
 gs_hallmark <- split(x = gs_hallmark$gene_symbol, f = gs_hallmark$gs_name)
 gs_gobp <- filter(msigdb_gene_sets, gs_cat == "C5", gs_subcat == "GO:BP")
 gs_gobp <- split(x = gs_gobp$gene_symbol, f = gs_gobp$gs_name)
-gs_reactome <- filter(msigdb_gene_sets, gs_cat == "C2", gs_subcat == "CP:REACTOME")
-gs_reactome <- split(x = gs_reactome$gene_symbol, f = gs_reactome$gs_name)
-gs_wp <- filter(msigdb_gene_sets, gs_cat == "C2", gs_subcat == "CP:WIKIPATHWAYS")
-gs_wp <- split(x = gs_wp$gene_symbol, f = gs_wp$gs_name)
 
 
 #
@@ -1930,23 +1847,6 @@ data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
 f <- file.path(working_dir, paste0(prefix, "_results.xlsx"))
 write_xlsx(gsea, f)
 
-#
-# Additional analysis
-#
-# prefix <- "gsea_wp"
-# padj_cutoff <- 0.01
-# gsea <- run_batch_fgsea(analyses, de, gs_wp, prefix, gsea_plot_dir, padj_cutoff)
-# gsea_wp <- as_tibble(gsea) %>%
-#   left_join(select(msigdb_gene_sets, gs_cat, gs_subcat, gs_name) %>% distinct(), 
-#             by=c("pathway"="gs_name"))
-# # write gsea results
-# f <- file.path(working_dir, paste0(prefix, "_results.tsv"))
-# data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
-# f <- file.path(working_dir, paste0(prefix, "_results.xlsx"))
-# write_xlsx(gsea, f)
-# 
-# gsea %>% filter(analysis == "path_hgd_vs_lgd") %>% arrange(padj) %>% head(100)
-
 
 #
 # HGD vs LGD gsea plots
@@ -1973,7 +1873,6 @@ p <- plot_gsea_volcano(x, padj_cutoff = 0.01, max.overlaps=Inf) +
   ggtitle("GO:BP Gene Sets")
 p
 ggsave(file.path(plot_dir, "gsea_hgd_vs_lgd_gobp_volcano.pdf"), plot=p, width=8, height=3)
-
 
 
 #
@@ -2026,7 +1925,6 @@ p <- ggplot(x, aes(x=analysis, y=NES, fill=fillneglog10padj)) +
   facet_wrap(~ pathway, nrow=1)
 p
 ggsave(file.path(plot_dir, "gsea_pdac_subtype_barplots.pdf"), p, width=9, height=5)
-#sp3+scale_color_gradientn(colours = rainbow(5))
 
 
 #
@@ -2141,7 +2039,6 @@ w <- 2 + ncol(m) / 2
 save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_gobp.pdf"), width=w, height=h)
 
 
-
 # GOBP leading edge
 gsea_merged <- bind_rows(gsea_hallmark, gsea_gobp)
 x <- gsea_merged %>% filter(analysis == "path_hgd_vs_lgd")
@@ -2175,159 +2072,11 @@ w <- 2 + ncol(m) / 2
 save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_merged.pdf"), width=w, height=h)
 
 
-#########################################################
-# GSEA Result Tables
-#########################################################
-
-# write gsea results
-x <- bind_rows(gsea_hallmark, gsea_gobp) %>%
-  filter(padj < 0.01) %>% arrange(desc(NES))
-write_xlsx(list(gsea = x),
-           file.path(working_dir, gsea_results_xlsx))
-
-#############################################################
-#
-# Cluster Labels
-#
-#############################################################
-
-g <- filter(grade_de_merged, de_path_pbhgd_vs_pblgd != "no") %>% select(gene) %>% pull()
-length(g)
-g <- union(g, filter(grade_de_merged, de_path_inthgd_vs_intlgd != "no") %>% select(gene) %>% pull())
-length(g)
-g <- union(g, filter(grade_de_merged, de_path_hgd_vs_lgd != "no") %>% select(gene) %>% pull())
-length(g)
-
-d <- dist(t(grade_voom_lcpm[grade_genes, ]), method="euclidean")
-# d <- dist(t(grade_voom_lcpm[g, ]), method="euclidean")
-clust <- hclust(d, method = "ward.D2")
-plot(clust, hang=-1, cex=0.5)
-grade_clust_labels <- cutree(clust, k = 2) - 1
-
-panck$samples$clust <- factor(grade_clust_labels)
-
-design <- model.matrix(~0 + clust, data=panck$samples)
-colnames(design)
-contrasts = makeContrasts(clust_1_vs_0 = clust1 - clust0,
-                          levels=design)
-# voom with scale normalization
-method <- "limma_voom_bgsub_q3"
-y <- DGEList(counts=panck$bgsub_gene_mat,
-             samples=panck$samples,
-             group=panck$samples$clust,
-             genes=gene_meta)
-y <- calcNormFactors(y, method="upperquartile")
-x <- limmaVoom(y, design, contrasts)
-res <- processLimma(x$fit, contrasts, method, de_padj_cutoff, de_log2fc_cutoff, de_result_dir)
-clust_de <- res
-clust_voom_lcpm <- as_tibble(x$voom, rownames="gene_symbol") %>%
-  column_to_rownames("gene_symbol")
-
-clust_de %>% arrange(-log2fc) %>% head(20)
-
-# gs <- gruetzmann_gs
-# gs <- append(gs, hpa_panc_gs)
-# gs <- append(gs, cptac_gs)
-gs <- msigdb_gene_sets
-gs <- split(x = gs$gene_symbol,
-            f = gs$gs_name)
-
-
-method <- "limma_voom_bgsub_q3"
-analysis <- "clust_1_vs_0"
-ranks <- get_de_ranks(clust_de, analysis)
-res <- fgsea(pathways = gs, 
-             stats = ranks,
-             minSize = 10,
-             eps = 0,
-             nPermSimple = 10000)
-res <- mutate(res, method = method, analysis = analysis)
-
-
-filter(res, padj < 0.05) %>% arrange(desc(NES)) %>% select(pathway, pval, padj, ES, NES, size) %>% as.data.frame()
-
-# write gsea results
-f <- file.path(working_dir, "gsea_clust_results.tsv")
-data.table::fwrite(res, file=f, sep="\t", sep2=c("", " ", ""))
-f <- file.path(working_dir, "gsea_clust_results.xlsx")
-write_xlsx(res, f)
-
-
-rf <- randomForest(x=t(grade_voom_lcpm[g, ]), 
-                   y=factor(grade_clust_labels),
-                   ntree = 10000,
-                   importance = TRUE)
-rf
-varImpPlot(rf)
-
-
-names(cutree(clust, k = 2)) == colnames(panck$bgsub_gene_mat)
-rect.hclust(clust, k=2, border="red")
-
-# Ward Hierarchical Clustering
-d <- dist(mydata, method = "euclidean") # distance matrix
-fit <- hclust(d, method="ward")
-plot(fit) # display dendogram
-groups <- cutree(fit, k=5) # cut tree into 5 clusters
-# draw dendogram with red borders around the 5 clusters
-rect.hclust(fit, k=5, border="red")
-
-?hclust
-?pheatmap
-clustering_distance_rows = "euclidean",
-clustering_distance_cols = "euclidean", clustering_method = "complete",
-clustering_callback = identity2, cutree_rows = NA, cutree_cols = NA,
-treeheight_row = ifelse((class(cluster_rows) == "hclust") || cluster_rows,
-                        50, 0), treeheight_col = ifelse((class(cluster_cols) == "hclust") ||
-                                                          cluster_cols, 50, 0)
-hclust
-
-
-#############################################################
-#
-# Figure data for manuscript
-#
-#############################################################
-
-# MUC1 expression associated with histology
-as.data.frame(hist_de_merged %>% filter(gene == "CLU"))
-as.data.frame(grade_de_merged %>% filter(gene == "SMAD4"))
-as.data.frame(filter(grade_de_merged, gene == "CXCL8"))
-as.data.frame(filter(grade_de_merged, gene == "SERPINB5"))
-as.data.frame(filter(grade_de_merged, gene == "LAMB3"))
-as.data.frame(grade_de_merged %>% filter(gene == "SMAD4"))
-as.data.frame(grade_de_merged %>% filter(gene == "LIF"))
-
 #############################################################
 #
 # correlation analysis
 #
 #############################################################
-
-cor_compute2 <- function(x, y, cor_method = "spearman") {
-  # setup
-  ngenes_x <- nrow(x)
-  ngenes_y <- nrow(y)
-  nsamples <- ncol(x)
-  r <- array(data = 0, dim = c(ngenes_x, ngenes_y), dimnames = list(rownames(x), rownames(y)))
-  pvals <- array(data = 0, dim = c(ngenes_x, ngenes_y), dimnames = list(rownames(x), rownames(y)))
-
-  for (i in 1:ngenes_x) {
-    for (j in 1:ngenes_y) {
-      res <- cor.test(x=unlist(x[i,]), y=unlist(y[j,]), 
-                      alternative="two.sided",
-                      method="spearman")
-      r[i,j] <- res$estimate
-      pvals[i,j] <- res$p.value
-    }
-    if (i %% 100 == 0) {
-      print(i)
-      flush.console()
-    }
-  }
-  return(list(r = r, pvals = pvals))
-}
-
 
 cor_compute <- function(x, y, nperms, cor_method = "spearman") {
   # setup
@@ -2572,11 +2321,6 @@ plot(mg,
      layout = layout_with_kk, 
      vertex.size = 20)
 
-# plot(clust, g,
-#      layout=layout_with_kk,
-#      vertex.size=2,
-#      vertex.label=NA)
-
 run_batch_enricher <- function(my_nodes, my_gs) {
   seg <- "panck"
   yy <- NULL
@@ -2604,61 +2348,28 @@ gs <- msigdb_gene_sets %>%
   select(gs_name, gene_symbol)
 clust_hallmark <- run_batch_enricher(clust_nodes, gs)
 
-clust_hallmark %>% arrange(p.adjust) %>% as.data.frame.table()
-clust_nodes %>% filter(community == 4) %>% as.data.frame.table()
-
 gs <- msigdb_gene_sets %>%
   dplyr::filter(gs_cat == "C5", gs_subcat == "GO:BP") %>%
   dplyr::select(gs_name, gene_symbol)
 clust_gobp <- run_batch_enricher(clust_nodes, gs)
 
-clust_gobp %>% arrange(p.adjust) %>% as.data.frame()
-table(clust_nodes %>% filter(community == 4) %>% pull(orig_gene) %in% hgd_up)
-table(clust_nodes %>% filter(community == 7) %>% pull(orig_gene) %in% hgd_up)
-
-colnames(grade_de_merged)
-x <- grade_de_merged %>% filter(de_path_inthgd_vs_pblgd == "up") %>% pull(gene)
-x <- grade_de_merged %>% filter(de_path_inthgd_vs_intlgd == "up") %>% pull(gene)
-x <- grade_de_merged %>% filter(de_path_pbhgd_vs_pblgd == "up") %>% pull(gene)
-x <- grade_de_merged %>% filter(de_path_hgd_vs_lgd == "up") %>% pull(gene)
-x
-x <- hist_de_merged %>% filter(de_hist_int_vs_gf == "up") %>% pull(gene)
-x <- hist_de_merged %>% filter(de_hist_pb_vs_gf == "up") %>% pull(gene)
-x <- hist_de_merged %>% filter(de_hist_gf == "dn") %>% pull(gene)
-x
-nrow(metadata)
-intersect(clust_nodes %>% filter(community == 7) %>% pull(orig_gene), x)
-length(intersect(clust_nodes %>% filter(community == 7) %>% pull(orig_gene), x))
-
-intersect(x, y)
-z <- intersect(clust_nodes %>% filter(community == 4) %>% pull(orig_gene), x)
-y <- intersect(clust_nodes %>% filter(community == 4) %>% pull(orig_gene), x)
-z
-y
-length(union(z, y))
-length(intersect(z, y))
-setdiff(y, z)
-setdiff(z, y)
-table(clust_nodes %>% filter(community == 7) %>% pull(orig_gene) %in% x)
-
-
 gs <- gmt_to_tbl(gs_pdac)
-gs <- gmt_to_tbl(cptac_gs)
 clust_pdac <- run_batch_enricher(clust_nodes, gs)
-
 clust_pdac %>% arrange(p.adjust) %>% as.data.frame()
-
-
-gs <- msigdb_gene_sets %>%
-  dplyr::filter(gs_cat == "C7", gs_subcat == "IMMUNESIGDB") %>%
-  dplyr::select(gs_name, gene_symbol)
-clust_immune <- run_batch_enricher(clust_nodes, gs)
 
 gs <- msigdb_gene_sets %>%
   dplyr::select(gs_name, gene_symbol)
 clust_all <- run_batch_enricher(clust_nodes, gs)
 
+# combine and filter results
+x <- bind_rows(clust_hallmark, clust_gobp, clust_pdac)
+x <- x %>% filter(p.adjust < 0.05, cluster_size >= 10)
+write_xlsx(
+  list(community_enrichment = x),
+  file.path(working_dir, community_enrichment_xlsx)
+)
 
+# inspect individual results
 x <- clust_all
 x <- x %>% filter(p.adjust < 0.05, cluster_size >= 10) %>% select(ID, GeneRatio, p.adjust, cluster_size, community)
 x %>% as.data.frame()
@@ -2666,782 +2377,19 @@ x %>% filter(community == 5) %>% as.data.frame()
 
 x <- clust_hallmark
 x <- x %>% filter(p.adjust < 0.05, cluster_size >= 10) %>% select(ID, GeneRatio, p.adjust, Count, cluster_size, community)
-x %>% filter(community == 4) %>% arrange(p.adjust) %>% as.data.frame()
+# x %>% filter(community == 4) %>% arrange(p.adjust) %>% as.data.frame()
 x <- x %>% as.data.frame()
+x
 
 x <- clust_gobp
 x <- x %>% filter(p.adjust < 0.05, cluster_size >= 10) %>% select(ID, GeneRatio, p.adjust, Count, cluster_size, community)
-x %>% filter(community == 7) %>% arrange(p.adjust) %>% as.data.frame()
+# x %>% filter(community == 7) %>% arrange(p.adjust) %>% as.data.frame()
 x %>% as.data.frame()
 
 x <- clust_pdac
+x
 x %>% arrange(p.adjust) %>% as.data.frame()
 x <- x %>% filter(p.adjust < 0.05, cluster_size >= 10) %>% select(ID, GeneRatio, p.adjust, Count, cluster_size, community)
 x %>% as.data.frame()
 
 
-
-gs <- msigdb_gene_sets %>%
-  dplyr::filter(gs_cat == "C7", gs_subcat == "IMMUNESIGDB") %>%
-  dplyr::select(gs_name, gene_symbol)
-gs <- msigdb_gene_sets %>%
-  dplyr::select(gs_name, gene_symbol)
-gs <- gmt_to_tbl(gmtPathways(gs_wikipathways_file))
-gs <- gmt_to_tbl(gmtPathways(gs_reactome_file))
-gs <- gmt_to_tbl(gmtPathways(gs_wikipathways_file))
-gs <- gmt_to_tbl(gmtPathways(gs_reactome_file))
-
-
-
-
-sum(table(clust_nodes$community) > 10)
-
-nrow(clust_nodes)
-nrow(clust_edges)
-colnames(x)
-print(x)
-x$community
-x[[3]]
-x[[4]]
-bind_rows(as.data.frame(x[[3]]), as.data.frame(x[[4]]))
-table(metadata$histology)
-
-
-seg <- "panck"
-yy <- NULL
-for (i in 1:length(unique(clust_nodes$community))) {
-  x <- dplyr::filter(clust_nodes, type == seg, community == i) %>% 
-    dplyr::select(orig_gene) %>% pull()
-  if (length(x) < 10) {
-    yy[[i]] <- NULL
-  } else {
-    yy[[i]] <- enricher(gene = x,
-                        pvalueCutoff = 0.05,
-                        pAdjustMethod = "BH",
-                        universe = cta_genes,
-                        qvalueCutoff = 0.1,
-                        TERM2GENE = gs)
-    print(yy[[i]])
-  }
-}
-
-
-yy
-
-
-yy[[3]]@result
-head(yy[[3]])
-str(yy[[1]])
-str(yy[[3]])
-
-
-
-barplot(yy[[7]])
-enrichplot::barplot.enrichResult
-enrichplot::dotplot(yy[[10]])
-enrichplot::dotplot(yy[[2]], showCategory = 3, font.size = 6)
-
-
-str(yy)
-str(yy[[2]])
-yy[[8]]
-yy[[2]]@result$qvalue
-yy[[16]]
-enrichplot::dotplot(yy[[16]])
-
-
-
-enricher(gene = x,
-         pvalueCutoff = 0.2,
-         pAdjustMethod = "BH",
-         universe = cta_genes,
-         TERM2GENE = gs)
-
-enrichGO(gene = x,
-         universe = cta_genes,
-         OrgDb = "org.Hs.eg.db",
-         keyType = "SYMBOL",
-         ont = "BP",
-         pAdjustMethod = "BH",
-         pvalueCutoff  = 0.2,
-         qvalueCutoff  = 0.2,
-         minGSSize = 10,
-         maxGSSize = 500,
-         readable = TRUE)
-
-
-
-
-y <- dplyr::filter(gene_meta, gene_symbol %in% x) %>% dplyr::select(entrez_id) %>% dplyr::pull()
-y <- filter(gene_meta, gene_symbol %in% x) %>% dplyr::select(entrez_id) %>% dplyr::pull()
-enricher(x, 
-         pvalueCutoff = 0.05,
-         pAdjustMethod = "BH",
-         universe = cta_genes,
-         TERM2GENE = dplyr::select(
-           hs_kegg_df,
-           gs_name,
-           human_entrez_gene
-         )
-)
-
-
-
-
-
-
-e <- cor_result_to_edges(panck_cor_res, self=TRUE)
-table(e$qval < 0.01)
-e %>% arrange(desc(cor))
-plot(grade_voom_lcpm["ACTB",])
-plot(t(grade_voom_lcpm["LIF",]), t(grade_voom_lcpm["EPHA2",]), col=color_scales$path[panck$samples$path])
-cor.test(t(grade_voom_lcpm["LIF",]), t(grade_voom_lcpm["CXCL8",]), method="pearson")
-
-# find connected components (at least 10 vertices)
-# TODO: improve this
-# min_csize <- 10
-# gcomponents <- decompose(g, mode="weak", min.vertices=min_csize)
-# gcomponents
-# sort(table(components(g)$membership))
-# components(g)$csize
-
-
-
-# edges_panck <- cor_to_edgelist(cor_panck, self=TRUE)
-# edges_panck$padj <- p.adjust(edges_panck$pval, method = "fdr")
-# qobj <- qvalue(edges_panck$pval)
-# edges_panck$qval <- qobj$qvalues
-# 
-# edges_cd45 <- cor_to_edgelist(cor_cd45, self=TRUE)
-# edges_cd45$padj <- p.adjust(edges_cd45$pval, method = "fdr")
-# qobj <- qvalue(edges_cd45$pval)
-# edges_cd45$qval <- qobj$qvalues
-
-
-#
-# process correlation results
-#
-edges_panck <- cor_to_edgelist(cor_panck, self=TRUE)
-edges_panck$padj <- p.adjust(edges_panck$pval, method = "fdr")
-qobj <- qvalue(edges_panck$pval)
-edges_panck$qval <- qobj$qvalues
-
-edges_cd45 <- cor_to_edgelist(cor_cd45, self=TRUE)
-edges_cd45$padj <- p.adjust(edges_cd45$pval, method = "fdr")
-qobj <- qvalue(edges_cd45$pval)
-edges_cd45$qval <- qobj$qvalues
-
-edges_panck_cd45 <- cor_to_edgelist(cor_panck_cd45, self=FALSE)
-edges_panck_cd45$padj <- p.adjust(edges_panck_cd45$pval, method = "fdr")
-qobj <- qvalue(edges_panck_cd45$pval)
-edges_panck_cd45$qval <- qobj$qvalues
-edges_panck_cd45$weight <- abs(edges_panck_cd45$cor)
-
-# select panck-cd45 edges
-edges <- edges_panck_cd45 %>% filter(qval < 0.01)
-nodes <- nodes %>% filter(id %in% union(edges$source, edges$target))
-
-# build graph object
-g <- igraph::graph_from_data_frame(d=edges, vertices=nodes, directed=FALSE)
-
-# find connected components (at least 10 vertices)
-# TODO: improve this
-min_csize <- 10
-gcomponents <- decompose(g, mode="weak", min.vertices=min_csize)
-table(components(g)$membership)
-components(g)$csize
-g <- gcomponents[[1]]
-# choose largest graph with most components
-# g <- igraph::induced_subgraph(g, igraph::V(g)[igraph::components(g)$membership == which.max(igraph::components(g)$csize)])
-
-# clustering/community detection
-clust <- cluster_leiden(g, 
-                        objective_function="modularity",
-                        resolution=0.1,
-                        n_iterations = 100)
-table(membership(clust))
-modularity(g, membership(clust))
-plot(clust, g, 
-     layout=layout_with_kk, 
-     vertex.size=2,
-     vertex.label=NA)
-V(g)$community <- factor(clust$membership)
-
-clust_nodes <- as_tibble(as_data_frame(g, what="vertices"))
-clust_edges <- as_tibble(as_data_frame(g, what="edges"))
-
-clust_nodes <- clust_nodes %>%
-  rename(label = name)
-clust_edges <- clust_edges %>%
-  rename(source = from,
-         target = to)
-clust_edges$cordir = ifelse(clust_edges$cor >= 0, "pos", "neg")
-
-
-write.table(clust_nodes, file=file.path(working_dir, "gephi_clust_panck_cd45_nodes.tsv"),
-            quote=FALSE,
-            sep="\t",
-            row.names=FALSE)
-write.table(clust_edges, file=file.path(working_dir, "gephi_clust_panck_cd45_edges.tsv"),
-            quote=FALSE,
-            sep="\t",
-            row.names=FALSE)
-
-
-clust_nodes <- as_tibble(as_data_frame(g, what="vertices"))
-clust_nodes[1,]
-for (i in 1:clust$nb_clusters) {
-  comm_nodes <- filter(clust_nodes, community == i)
-  panck_genes <- comm_nodes %>% filter(type == "panck") %>% select(orig_gene) %>% pull()
-  cd45_genes <- comm_nodes %>% filter(type == "cd45") %>% select(orig_gene) %>% pull()
-  if (length(panck_genes) == 0) {
-    next
-  }
-  if (length(cd45_genes) == 0) {
-    next
-  }
-  f = file.path(cor_clust_dir, paste0("clust", i, "_panck.txt"))
-  write(panck_genes, file=f, sep="\n")
-  f = file.path(cor_clust_dir, paste0("clust", i, "_cd45.txt"))
-  write(cd45_genes, file=f, sep="\n")
-}
-
-
-# filter significant edges
-edges <- bind_rows(edges_panck, edges_cd45, edges_panck_cd45)
-hist(edges$qval)
-edges$weight <- abs(edges$cor)
-edges <- edges %>% filter(qval < 0.01)
-nodes <- nodes %>% filter(gene %in% union(edges$source, edges$target))
-
-# build graph object
-g <- igraph::graph_from_data_frame(d=edges, vertices=nodes, directed=FALSE)
-
-# find connected components (at least 10 vertices)
-# TODO: improve this
-min_csize <- 10
-gcomponents <- decompose(g, mode="weak", min.vertices=min_csize)
-g <- gcomponents[[1]]
-# choose largest graph with most components
-# g <- igraph::induced_subgraph(g, igraph::V(g)[igraph::components(g)$membership == which.max(igraph::components(g)$csize)])
-
-
-clust_nodes <- as_tibble(as_data_frame(g, what="vertices"))
-clust_edges <- as_tibble(as_data_frame(g, what="edges"))
-
-
-# TODO: components with all types (panck and cd45)
-E(g)$weight <- abs(E(g)$cor) ** 4
-
-# clustering/community detection
-leidclust <- cluster_leiden(g, 
-                            objective_function="modularity",
-                            resolution=1)
-clust <- leidclust
-
-
-modularity(g, membership(clust))
-V(g)$community <- factor(clust$membership)
-table(membership(clust))
-
-clust_nodes <- as_tibble(as_data_frame(g, what="vertices"))
-clust_nodes[1,]
-for (i in 1:clust$nb_clusters) {
-  comm_nodes <- filter(clust_nodes, community == i)
-  panck_genes <- comm_nodes %>% filter(type == "panck") %>% select(orig_gene) %>% pull()
-  cd45_genes <- comm_nodes %>% filter(type == "cd45") %>% select(orig_gene) %>% pull()
-  if (length(panck_genes) == 0) {
-    next
-  }
-  if (length(cd45_genes) == 0) {
-    next
-  }
-  f = file.path(cor_clust_dir, paste0("clust", i, "_panck.txt"))
-  write(panck_genes, file=f, sep="\n")
-  f = file.path(cor_clust_dir, paste0("clust", i, "_cd45.txt"))
-  write(cd45_genes, file=f, sep="\n")
-}
-
-
-
-
-?cluster_leiden
-igraph::modularity(com)
-igraph::membership(leidclust)
-
-print(leidclust)
-?membership
-
-
-ebc <- cluster_edge_betweenness(g, weights=1-E(g)$weight)
-imc <- cluster_infomap(g)
-lec <- cluster_leading_eigen(g)
-loc <- cluster_louvain(g)
-leidc <- cluster_leiden(g, objective_function="modularity")
-sgc <- cluster_spinglass(g)
-wtc <- cluster_walktrap(g)
-scores <- c(ebc = modularity(g, membership(ebc)),
-            infomap = modularity(g,membership(imc)),
-            eigen = modularity(g,membership(lec)),
-            louvain = modularity(g,membership(loc)),
-            leiden = modularity(g,membership(leidc)),
-            spinglass = modularity(g,membership(sgc)),
-            walk = modularity(g,membership(wtc)))
-
-
-cluster_leiden(g)
-
-com <- igraph::cluster_louvain(g, resolution = 0.25)
-l <- igraph::layout_with_fr(g)
-
-
-
-?igraph::communities
-com <- igraph::cluster_edge_betweenness(g)
-
-V(g)$color <- com$membership+1
-g <- set_graph_attr(g, "layout", layout_with_kk(g))
-plot(g, vertex.label.dist=1.5)
-
-?igraph::edge.betweenness.community
-
-plot(g, 
-     layout=l,
-     vertex.size=1, 
-     vertex.label.cex=0.5,
-     vertex.frame.color=NA)
-
-plot(g, layout=l, edge.color="black", vertex.label="", main=layout)
-
-
-
-
-
-write.table(n, file=file.path(working_dir, "graph_panck_cd45_nodes.tsv"),
-            quote=FALSE,
-            sep="\t",
-            row.names=FALSE)
-write.table(e, file=file.path(working_dir, "graph_panck_cd45_edges.tsv"),
-            quote=FALSE,
-            sep="\t",
-            row.names=FALSE)
-
-color_scale = c(none = "#888888",
-                hgd = "#FF0000",
-                lgd = "#0000FF",
-                pbhgd = "#32cd32",
-                inthgd = "#670092",
-                pblgd = "#1677c4",
-                intlgd = "#ff6700",
-                cd45 = "#ffff00")
-V(g)$color <- color_scale[V(g)$grade_subtype]
-
-# E(g)$weight <- E(g)$cor
-E(g)$weight <- 500*abs(E(g)$cor)**6
-
-l = layout_with_fr(g)
-plot(g, layout=l, 
-     vertex.size=3, 
-     vertex.label=vertex_attr(g, "orig_gene"),
-     vertex.label.family="Arial",
-     vertex.label.cex=0.2,
-     vertex.label.color="black")
-
-
-E(g)$cor
-edge_attr(g)
-vertex_attr(g, "orig_gene")
-plot(g4, edge.arrow.size=.5, vertex.label.color="black", vertex.label.dist=1.5,
-     vertex.color=c( "pink", "skyblue")[1+(V(g4)$gender=="male")] ) 
-
-
-
-
-
-
-library(RColorBrewer)
-colors=brewer.pal(length(com),'Accent') #make a color palette
-V(g.sparrow)$color=colors[membership(com)] #assign each vertex a color based on the community assignment
-
-set.seed(2)
-plot(g.sparrow, vertex.label="", edge.width=E(g.sparrow)$weight*5)
-
-
-panck_grade_nodes <- filter(nodes, grade_subtype != "none", grade_subtype != "cd45")
-cd45_nodes <- filter(nodes, type == "cd45")
-e <- edges %>% 
-  filter(qval < 0.01,
-         from %in% panck_grade_nodes$gene,
-         to %in% cd45_nodes$gene)
-
-rows <- unique(e$from)
-cols <- unique(e$to)
-m <- cor_panck_cd45$r[rows, cols]
-m <- sign(m) * m**4
-
-p <- pheatmap(m, 
-              scale = "none",
-              color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
-              breaks = seq(-0.9, 0.9, length.out=51),
-              border_color = NA,
-              cluster_rows = TRUE,
-              cluster_cols = TRUE,
-              clustering_method = "ward.D2",
-              fontsize_row = 6,
-              fontsize_col = 6)
-
-save_pheatmap_pdf(p, filename=file.path(plot_dir, "cor_panck_cd45.pdf"), width=10, height=10)
-
-
-
-#
-# filter edges to enable network creation
-#
-e <- bind_rows(edges_panck, edges_cd45, edges_panck_cd45)
-e$weight <- abs(e$cor) ** 3
-e <- e %>% 
-  filter(qval < 0.01)
-
-
-ranks <- cor_tbl %>%
-  filter(panck == "LIF") %>%
-  select(cd45, cor) %>%
-  arrange(desc(cor))
-ranks = sort(setNames(ranks$cor, ranks$cd45), decreasing = TRUE)
-
-res <- fgsea(pathways = gs_gobp,
-             stats = ranks,
-             minSize = 10,
-             eps = 0,
-             nPermSimple = 10000)
-res <- as_tibble(res) %>%
-  filter(padj < 0.05) %>% arrange(desc(NES))
-res$pathway
-
-get_de_ranks <- function(de, a) {
-  ranks <- de %>% 
-    filter(analysis == a) %>%
-    select(gene, log2fc, padj) %>%
-    mutate(rank = log2fc)
-  ranks = sort(setNames(ranks$rank, ranks$gene), decreasing = TRUE)
-  return(ranks)
-}
-
-filter(res, padj < 0.05) %>% arrange(desc(NES)) %>% select(pathway, pval, padj, ES, NES, size) %>% as.data.frame()
-
-dim(x)
-x <- cor_tbl %>%
-  filter(pval < 0.05)
-ggplot(x, aes(x = cor, y = -log10(padj))) + 
-  geom_point()
-
-x %>% arrange(desc(cor)) %>% head(30) %>% as.data.frame()
-x %>% filter(cd45 == "ITGA2" | panck == "ITGA2", padj < 0.05) %>% arrange(cor) %>% as.data.frame()
-x %>% filter(panck == "CD55", pval < 0.05) %>% arrange(cor) %>% as.data.frame()
-
-
-
-e <- edges_panck_cd45 %>%
-  mutate(source_orig_gene = gsub("panck_", "", source),
-         target_orig_gene = gsub("cd45_", "", target)) %>%
-  mutate(same_gene = source_orig_gene == target_orig_gene)
-
-ggplot(e, aes(x=cor, y=factor(same_gene))) + 
-  stat_density_ridges(alpha=0.7, scale=2, rel_min_height=0.0, quantile_lines=TRUE)
-
-
-plot(paired_panck$mat["panck_LIF",], paired_cd45$mat["cd45_LIF",])
-
-
-
-# # filter genes associated with disease (include cd45 nodes)
-# nrow(nodes)
-# n <- filter(nodes, grade_subtype != "none")
-# # get edges
-# nrow(e)
-# e <- e %>% filter((from %in% n$gene) | (to %in% n$gene))
-# nrow(e)
-# subset nodes
-# sum(nodes$gene %in% union(e$from, e$to))
-# n <- filter(nodes, gene %in% union(e$from, e$to))
-
-# 
-# paired_cor_test_v1 <- function(x, y, nperms, method = "spearman") {
-#   nrows <- nrow(x)
-#   ncols <- ncol(x)
-#   r <- array(data = 0, dim = c(ncols, ncols), dimnames = list(colnames(x), colnames(y)))
-#   pvals <- array(data = 1, dim = c(ncols, ncols), dimnames = list(colnames(x), colnames(y)))
-#   set.seed(1)
-#   perms <- replicate(nperms, sample(nrows))
-#   
-#   for (i in 1:ncols) {
-#     r[i, ] <- cor(x[, i], y, method = method)
-#     rnull <- array(0, dim = c(nperms, ncols))
-#     for (p in 1:nperms) {
-#       rnull[p, ] <- abs(cor(x[, i], y[perms[, p], ], method = method))
-#     }
-#     pvals_row <- sweep(rnull, 2, FUN=">=", abs(r[i, ]))
-#     pvals[i, ] <- apply(pvals_row, 2, mean)
-#     print(i)
-#   }
-#   return(list(r = r, pvals = pvals))
-# }
-
-
-
-
-x <- paired_panck_cd45$panck$mat[paste0("panck_", c("LIF", "CXCL8")),]
-y <- paired_panck_cd45$cd45$mat
-r <- cor_compute(x, y, 10000)
-edges <- cor_result_to_edges(r)
-
-
-n <- bind_cols(label = rownames(paired_panck_cd45$cd45$mat),
-               orig_gene = paired_panck_cd45$cd45$genes,
-               type = "cd45")
-
-e <- filter(edges, source == "panck_LIF") %>%
-  inner_join(n, by=c("target"="label"))
-
-x <- e %>% filter(cor < 0, pval < 0.01) %>% select(orig_gene) %>% pull()
-write(x, file=file.path(working_dir, "nodes_dn.txt"), sep="\n")
-x <- e %>% filter(cor >= 0, pval < 0.01) %>% select(orig_gene) %>% pull()
-write(x, file=file.path(working_dir, "nodes_up.txt"), sep="\n")
-
-
-
-ranks <- cor_tbl %>%
-  filter(panck == "LIF") %>%
-  select(cd45, cor) %>%
-  arrange(desc(cor))
-ranks = sort(setNames(ranks$cor, ranks$cd45), decreasing = TRUE)
-
-res <- fgsea(pathways = gs_gobp,
-             stats = ranks,
-             minSize = 10,
-             eps = 0,
-             nPermSimple = 10000)
-res <- as_tibble(res) %>%
-  filter(padj < 0.05) %>% arrange(desc(NES))
-res$pathway
-
-get_de_ranks <- function(de, a) {
-  ranks <- de %>% 
-    filter(analysis == a) %>%
-    select(gene, log2fc, padj) %>%
-    mutate(rank = log2fc)
-  ranks = sort(setNames(ranks$rank, ranks$gene), decreasing = TRUE)
-  return(ranks)
-}
-
-filter(res, padj < 0.05) %>% arrange(desc(NES)) %>% select(pathway, pval, padj, ES, NES, size) %>% as.data.frame()
-
-dim(x)
-x <- cor_tbl %>%
-  filter(pval < 0.05)
-ggplot(x, aes(x = cor, y = -log10(padj))) + 
-  geom_point()
-
-x %>% arrange(desc(cor)) %>% head(30) %>% as.data.frame()
-x %>% filter(cd45 == "ITGA2" | panck == "ITGA2", padj < 0.05) %>% arrange(cor) %>% as.data.frame()
-x %>% filter(panck == "CD55", pval < 0.05) %>% arrange(cor) %>% as.data.frame()
-
-
-
-# #
-# # full network (panck + sma + cd45)
-# #
-# # edges
-# edges_all <- bind_rows(cor_result_to_edges(paired_panck_cd45$cor_result),
-#                        cor_result_to_edges(paired_panck_sma$cor_result),
-#                        cor_result_to_edges(panck_cor_res, self=TRUE),
-#                        cor_result_to_edges(cd45_cor_res, self=TRUE),
-#                        cor_result_to_edges(sma_cor_res, self=TRUE))
-# 
-# # filter significant edges
-# # edges <- filter(edges_all, qval < cor_qval_cutoff,
-# #                 abs(cor) >= cor_r_cutoff)
-# edges <- filter(edges_all, qval < cor_qval_cutoff,
-#                 cor >= cor_r_cutoff)
-# edges$weight <- abs(edges$cor) ** cor_weight_beta
-# #edges$cordir <- ifelse(edges$cor >= 0, "pos", "neg")
-# #edges$weight <- edges$cor ** cor_weight_beta
-# #edges$weight <- ((1 + edges$cor)/2) ** cor_weight_beta
-# #edges$weight <- abs(edges$cor) ** cor_weight_beta
-# #edges$weight <- sign(edges$cor) * abs(edges$cor) ** cor_weight_beta
-# 
-# 
-# # nodes
-# nodes_panck <- bind_cols(label = rownames(panck_cor_mat),
-#                          orig_gene = rownames(grade_voom_lcpm),
-#                          type = "panck",
-#                          grade_subtype = grade_de_merged$subtype,
-#                          grade_log2fc = grade_de_merged$log2fc_path_hgd_vs_lgd)
-# nodes_cd45 <- bind_cols(label = rownames(cd45_cor_mat),
-#                         orig_gene = rownames(cd45_voom_lcpm),
-#                         type = "cd45",
-#                         grade_subtype = "cd45",
-#                         grade_log2fc = 0)
-# nodes_sma <- bind_cols(label = rownames(sma_cor_mat),
-#                        orig_gene = rownames(sma_voom_lcpm),
-#                        type = "sma",
-#                        grade_subtype = "sma",
-#                        grade_log2fc = 0)
-# nodes <- bind_rows(nodes_panck, nodes_cd45, nodes_sma)
-# nodes$id <- nodes$label
-# 
-# # filter nodes
-# nodes <- nodes %>% filter(id %in% union(edges$source, edges$target))
-# 
-# # build graph object
-# g <- igraph::graph_from_data_frame(d=edges, vertices=nodes, directed=FALSE)
-# 
-# # choose largest weakly connected graph
-# # g <- igraph::induced_subgraph(g, igraph::V(g)[igraph::components(g)$membership == which.max(igraph::components(g)$csize)])
-# 
-# # # plot graph
-# # plot(g,
-# #      layout=layout_with_fr,
-# #      vertex.size=2,
-# #      vertex.label=NA)
-# 
-# # clustering/community detection
-# clust <- cluster_leiden(g,
-#                         objective_function="modularity",
-#                         resolution=graph_clust_resolution,
-#                         n_iterations=1000)
-# modularity(g, membership(clust))
-# table(membership(clust))
-# # plot(clust, g,
-# #      layout=layout_with_kk,
-# #      vertex.size=2,
-# #      vertex.label=NA)
-# V(g)$community <- factor(clust$membership)
-# 
-# clust_nodes <- as_tibble(as_data_frame(g, what="vertices"))
-# clust_edges <- as_tibble(as_data_frame(g, what="edges"))
-# clust_nodes <- clust_nodes %>%
-#   dplyr::rename(label = name)
-# clust_edges <- clust_edges %>%
-#   dplyr::rename(source = from,
-#                 target = to)
-# 
-# write.table(clust_nodes, file=file.path(working_dir, "graph_clust_nodes.tsv"),
-#             quote=FALSE,
-#             sep="\t",
-#             row.names=FALSE)
-# write.table(clust_edges, file=file.path(working_dir, "graph_clust_edges.tsv"),
-#             quote=FALSE,
-#             sep="\t",
-#             row.names=FALSE)
-# 
-# 
-# 
-# # TODO: explore 'nest' and 'unnest'
-# merged_nodes <- clust_nodes %>%
-#   dplyr::group_by(community) %>%
-#   dplyr::summarize(size = n()) %>%
-#   dplyr::mutate(id = paste0("c", community),
-#                 label = id)
-# 
-# nclust <- length(unique(clust_nodes$community))
-# e <- filter(edges_all, qval < cor_qval_cutoff)
-# 
-# merged_edges <- NULL
-# for (i in 1:nclust) {
-#   ni <- clust_nodes %>% dplyr::filter(community == i) %>% dplyr::select(id) %>% dplyr::pull()
-#   if (length(ni) < min_csize) {
-#     next
-#   }
-#   for (j in (i+1):nclust) {
-#     nj <- clust_nodes %>% dplyr::filter(community == j) %>% dplyr::select(id) %>% dplyr::pull()
-#     if (length(nj) < min_csize) {
-#       next
-#     }
-#     eij <- bind_rows(edges_all %>% filter(source %in% ni, target %in% nj),
-#                      edges_all %>% filter(source %in% nj, target %in% ni))
-#     if (nrow(eij) == 0) {
-#       next
-#     }
-#     avgcor <- mean(eij$cor)
-#     tbl <- tibble(source = paste0("c", i), 
-#                   target = paste0("c", j), 
-#                   avgcor = avgcor,
-#                   n = nrow(eij))
-#     merged_edges <- bind_rows(merged_edges, tbl)
-#     print(paste0(i, " d ", j))
-#   }
-# }
-# 
-# summary(merged_edges$avgcor)
-# merged_edges <- merged_edges %>%
-#   mutate(weight = 1 - avgcor,
-#          cordir = ifelse(avgcor < 0, "neg", "pos"))
-# 
-# 
-# write.table(merged_nodes, file=file.path(working_dir, "graph_merged_clust_nodes.tsv"),
-#             quote=FALSE,
-#             sep="\t",
-#             row.names=FALSE)
-# write.table(merged_edges, file=file.path(working_dir, "graph_merged_clust_edges.tsv"),
-#             quote=FALSE,
-#             sep="\t",
-#             row.names=FALSE)
-# 
-# mg <- igraph::graph_from_data_frame(d=merged_edges, vertices=merged_nodes, directed=FALSE)
-# plot(mg, 
-#      vertex.size = 2)
-# 
-# merged_nodes[1,]
-# # plot(clust, g,
-# #      layout=layout_with_kk,
-# #      vertex.size=2,
-# #      vertex.label=NA)
-
-
-##################################################
-#
-#
-# Volcano plots
-#
-#
-##################################################
-
-# # TODO
-# 
-# 
-# 
-# x <- matrix(c(1, 3, 1, 2, 1, 3, 1, 50, 40, 10, 20, 50, 30, 10, 21, 1, 2, 2, 3, 4, 6, 1, 2, 80, 60, 50, 100, 200), ncol=4)
-# x
-# xcpm <- sweep(x * 100, 2, colSums(x), "/")
-# xcpm
-# 
-# normalize_quantile_global(xcpm)
-# normalizeQuantiles(xcpm, ties=FALSE)
-# 
-# rowSums(xcpm)
-# globalrank <- rank(rowSums(xcpm), ties.method="min")
-# globalrank
-# 
-# xrank <- apply(xcpm, 2, rank, ties.method="min")
-# xrank
-# globalrank
-# 
-# ord <- apply(xcpm, 2, order, globalrank)
-# xrank <- apply(ord, 2, order)
-# 
-# xsort <- apply(x, 2, sort)
-# xsort
-# xmean <- apply(xsort, 1, mean)
-# xmean
-# 
-# 
-# 
-# 
-# xcpm <- apply(xcpm, 2, pmax, 1)
-# normalizeQuantiles(x, ties=FALSE)
-# rank(rowSums(x))
-# 
-# preprocessCore::normalize.quantiles(x)
-# normalizeQuantiles(x, ties=FALSE)
-# xn <- as.data.frame(normalizeQuantiles(as.matrix(xn), ties=FALSE))
