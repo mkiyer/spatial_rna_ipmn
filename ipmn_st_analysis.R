@@ -189,6 +189,11 @@ process_input <- function(xlsx_file,
     summarize(across(metadata$aoi_id, quantile, 0.75, names = FALSE)) %>%
     unlist()
   
+  # metadata$q2 <- counts %>%
+  #   filter(probe_type == 1) %>%
+  #   summarize(across(metadata$aoi_id, quantile, 0.50, names = FALSE)) %>%
+  #   unlist()
+  
   # calculate signal to noise ratios
   metadata$num_counts <- colSums(counts[, metadata$aoi_id])
   metadata$snr <- metadata$num_counts / metadata$negprobe_counts
@@ -284,6 +289,9 @@ get_bgsub_qnorm_cpm <- function(x, sample_meta) {
 ipmn <- process_input(input_xlsx_file, 
                       negprobe_lod_quantile = qc_negprobe_lod_quantile)
 
+colnames(ipmn$metadata)
+table(ipmn$metadata$slide_id, ipmn$metadata$histpath)
+
 #
 # samples 
 #
@@ -357,6 +365,7 @@ counts_probe <- counts_probe %>%
 summary(counts_probe$frac_expr)
 table(counts_probe$expressed)
 
+
 # filter probes with low expression
 # fcounts_probe <- filter(counts_probe, (probe_type == 0) | (frac_expr > qc_min_frac_expr))
 fcounts_probe <- filter(counts_probe, probe_type == 1, frac_expr_avg > qc_min_frac_expr)
@@ -427,7 +436,7 @@ read_cptac_pdac_data <- function(filename, log2fc_cutoff, padj_cutoff) {
   # GeneSymbol	MedianLog2FoldChange	p value	FDR	
   # MedianLog2FoldChange.duct	p value.duct	FDR.duct	
   # Expression Coefficient	p value of adjusted expression	FDR of adjusted expression
-  # TODO: add duct / epithelial filtered data
+  # add additional data?
   prot <- read_excel(cptac_panc_file, sheet="Diff_exp_prot")
   prot <- prot %>%
     dplyr::rename(
@@ -746,6 +755,126 @@ p <- x %>%
 p
 f <- file.path(plot_dir, "ridge_plot_rawcounts_by_aoi.pdf")
 ggsave(f, plot=p, device="pdf", width = 8, height = 8)
+
+
+# cpm (without background subtract)
+x <- counts_probe %>% select(fmetadata$aoi_id)
+x <- sweep(x, 2, colSums(x) / 1e6, "/")
+x <- bind_cols(select(counts_probe, -fmetadata$aoi_id), x)
+y <- select(fmetadata, aoi_id, slide_id, segment, histology, histpath, path)
+x <- x %>%
+  pivot_longer(fmetadata$aoi_id, names_to="aoi_id", values_to="count") %>%
+  inner_join(y, by=c("aoi_id"="aoi_id"))
+
+# ridge plot showing variability in background noise
+p <- x %>% filter(expressed == "bg") %>%
+  ggplot(aes(x=count, y=reorder(factor(aoi_id), count), fill=factor(slide_id))) +
+  stat_density_ridges(alpha=0.7, scale=4, rel_min_height=0.001, quantile_lines=TRUE) + 
+  scale_fill_manual(values = pals::cols25()) +
+  xlab("CPM") +
+  ylab("AOIs") +
+  labs(fill = "Neg. Probes") +
+  theme_ridges() + 
+  theme(axis.text = element_text(size=5)) + 
+  facet_grid(slide_id ~ ., scales="free_y")
+p
+f <- file.path(plot_dir, "ridge_plot_bg_cpm_by_aoi.pdf")
+ggsave(f, plot=p, device="pdf", width = 8, height = 8)
+
+
+# plot: compared median counts to bg counts
+x <- x %>%
+  group_by(aoi_id, expressed) %>%
+  summarise(slide_id = unique(slide_id),
+            mediancpm = median(count),
+            q3cpm = quantile(count, 0.75)) %>%
+  ungroup()
+p <- ggplot(x, aes(x=mediancpm, y=reorder(factor(aoi_id), mediancpm), color=factor(expressed))) +
+  geom_point(size=2) +
+  scale_color_manual(values = pals::cols25()) +
+  labs(color = "Expressed", x="Median CPM", y="ROI") + 
+  theme_ridges() + 
+  theme(axis.text.y = element_blank())
+p
+f <- file.path(plot_dir, "qc_point_plot_cpm_by_aoi.pdf")
+ggsave(f, plot=p, device="pdf")
+
+
+x <- x %>% 
+  pivot_wider(names_from = "expressed", values_from=c("mediancpm", "q3cpm"))
+corlab <- paste0("r = ", round(cor.test(x$mediancpm_bg, x$mediancpm_yes)$estimate, 2))
+p <- ggplot(x, aes(x=mediancpm_bg, y=mediancpm_yes)) +
+  geom_point() + 
+  geom_smooth(method = 'lm', formula = y ~ x, se = FALSE, color="red", linetype="dashed") +
+  annotate("text", x=60, y=60, label = corlab) +
+  theme_minimal() + 
+  labs(x="median CPM background", y="median CPM expressed")
+p
+f <- file.path(plot_dir, "scatter_qc_bg_vs_expressed.pdf")
+ggsave(f, plot=p, device="pdf", width = 4, height = 3)
+
+
+# cpm (with background subtract)
+x <- counts_probe %>% select(fmetadata$aoi_id)
+x <- background_subtract(x, fmetadata$negprobe_geomean)
+x <- sweep(x, 2, colSums(x) / 1e6, "/")
+x <- bind_cols(select(counts_probe, -fmetadata$aoi_id), x)
+y <- select(fmetadata, aoi_id, slide_id, segment, histology, histpath, path)
+x <- x %>%
+  pivot_longer(fmetadata$aoi_id, names_to="aoi_id", values_to="count") %>%
+  inner_join(y, by=c("aoi_id"="aoi_id"))
+x <- x %>%
+  group_by(aoi_id, expressed) %>%
+  summarise(slide_id = unique(slide_id),
+            mediancpm = median(count),
+            q3cpm = quantile(count, 0.75)) %>%
+  ungroup()
+p <- ggplot(x, aes(x=mediancpm, y=reorder(factor(aoi_id), mediancpm), color=factor(expressed))) +
+  geom_point(size=2) +
+  scale_color_manual(values = pals::cols25()) +
+  labs(color = "Expressed", x="Median CPM", y="ROI") + 
+  theme_ridges() + 
+  theme(axis.text.y = element_blank())
+p
+f <- file.path(plot_dir, "qc_point_plot_bgsub_cpm_by_aoi.pdf")
+ggsave(f, plot=p, device="pdf")
+
+
+x <- x %>% 
+  pivot_wider(names_from = "expressed", values_from=c("mediancpm", "q3cpm"))
+corlab <- paste0("r = ", round(cor.test(x$mediancpm_bg, x$mediancpm_yes)$estimate, 2))
+p <- ggplot(x, aes(x=mediancpm_bg, y=mediancpm_yes)) +
+  geom_point() + 
+  geom_smooth(method = 'lm', formula = y ~ x, se = FALSE, color="red", linetype="dashed") + 
+  annotate("text", x=10, y=40, label = corlab) +
+  theme_minimal() + 
+  labs(x="median CPM background", y="median CPM expressed")
+p
+f <- file.path(plot_dir, "scatter_qc_bgsub_bg_vs_expressed.pdf")
+ggsave(f, plot=p, device="pdf", width = 4, height = 3)
+
+
+# cpm (with qnorm)
+x <- get_bgsub_qnorm_cpm(counts_probe, samples)
+x <- x %>%
+  pivot_longer(fmetadata$aoi_id, names_to="aoi_id", values_to="count") %>%
+  inner_join(y, by=c("aoi_id"="aoi_id"))
+x <- x %>%
+  group_by(aoi_id, expressed) %>%
+  summarise(slide_id = unique(slide_id),
+            mediancpm = median(count),
+            q3cpm = quantile(count, 0.75)) %>%
+  ungroup()
+p <- ggplot(x, aes(x=mediancpm, y=reorder(factor(aoi_id), mediancpm), color=factor(expressed))) +
+  geom_point(size=2) +
+  scale_color_manual(values = pals::cols25()) +
+  labs(color = "Expressed", x="Median CPM", y="ROI") + 
+  theme_ridges() + 
+  theme(axis.text.y = element_blank())
+p
+f <- file.path(plot_dir, "qc_point_plot_bgsub_qnorm_cpm_by_aoi.pdf")
+ggsave(f, plot=p, device="pdf")
+
 
 #
 # normalized count ridge plots
@@ -1652,6 +1781,18 @@ get_de_ranks <- function(de, a) {
   return(ranks)
 }
 
+plot_gsea_enrichment <- function(x, ranks, gs) {
+  txt_stat <- paste0("ES=", round(x$ES,2), " NES=", round(x$NES, 2), " padj=", format(x$padj, scientific=TRUE, digits=3))
+  txt_title <- paste0("ranks: ", a, " gs: ", x$pathway)
+  p <- plotEnrichment(gs[[x$pathway]], ranks) +
+    annotate(geom="text", x=150, y=0.1, label=txt_stat, hjust=0) +
+    labs(title = txt_title, 
+         xlab = "Rank",
+         ylab = "Enrichment Score") +
+    theme(plot.title = element_text(size=8))
+  return(p)
+}
+
 run_batch_fgsea <- function(my_analyses, my_de, my_gs, my_prefix, my_plot_dir, my_padj_cutoff=0.01) {
   gsea <- NULL
   for (a in my_analyses) {
@@ -1670,18 +1811,6 @@ run_batch_fgsea <- function(my_analyses, my_de, my_gs, my_prefix, my_plot_dir, m
     }
   }
   return(gsea)
-}
-
-plot_gsea_enrichment <- function(x, ranks, gs) {
-  txt_stat <- paste0("ES=", round(x$ES,2), " NES=", round(x$NES, 2), " padj=", format(x$padj, scientific=TRUE, digits=3))
-  txt_title <- paste0("ranks: ", a, " gs: ", x$pathway)
-  p <- plotEnrichment(gs[[x$pathway]], ranks) +
-    annotate(geom="text", x=150, y=0.1, label=txt_stat, hjust=0) +
-    labs(title = txt_title, 
-         xlab = "Rank",
-         ylab = "Enrichment Score") +
-    theme(plot.title = element_text(size=8))
-  return(p)
 }
 
 gmt_to_tbl <- function(gmt) {
@@ -1794,7 +1923,6 @@ gs_hallmark <- filter(msigdb_gene_sets, gs_cat == "H")
 gs_hallmark <- split(x = gs_hallmark$gene_symbol, f = gs_hallmark$gs_name)
 gs_gobp <- filter(msigdb_gene_sets, gs_cat == "C5", gs_subcat == "GO:BP")
 gs_gobp <- split(x = gs_gobp$gene_symbol, f = gs_gobp$gs_name)
-
 
 #
 # Setup analysis
@@ -2213,10 +2341,14 @@ nodes <- mutate(nodes,
 # filter nodes
 nodes <- nodes %>% filter(id %in% union(edges$source, edges$target))
 
+
 #
 # build graph object
 #
 g <- igraph::graph_from_data_frame(d=edges, vertices=nodes, directed=FALSE)
+
+igraph::components(g)$csize
+
 
 res <- NULL
 i <- 1
@@ -2232,10 +2364,19 @@ for (r in seq(0.01, 1, by=0.01)) {
   i <- i+ 1
 }
 res <- bind_rows(res)
-ggplot(res, aes(x=r, y=m)) + 
-  geom_point()
-ggplot(res, aes(x=r, y=n)) + 
-  geom_point()
+p1 <- ggplot(res, aes(x=r, y=m)) + 
+  geom_point() + 
+  geom_vline(xintercept=graph_clust_resolution, linetype="dashed", color="red") +
+  labs(x="resolution", y="modularity")
+p2 <- ggplot(res, aes(x=r, y=n)) + 
+  geom_point() +
+  geom_vline(xintercept=graph_clust_resolution, linetype="dashed", color="red") +
+  labs(x="resolution", y="# of clusters")
+
+library(patchwork)
+p <- p1 / p2
+f <- file.path(plot_dir, "clust_leiden_modularity.pdf")
+ggsave(f, p)
 
 # clustering/community detection
 clust <- cluster_leiden(g,
@@ -2264,7 +2405,6 @@ write.table(clust_edges, file=file.path(working_dir, "graph_clust_edges.tsv"),
             sep="\t",
             row.names=FALSE)
 
-# TODO: explore 'nest' and 'unnest'
 merged_nodes <- clust_nodes %>%
   dplyr::group_by(community) %>%
   dplyr::summarize(size = n()) %>%
@@ -2357,6 +2497,9 @@ gs <- gmt_to_tbl(gs_pdac)
 clust_pdac <- run_batch_enricher(clust_nodes, gs)
 clust_pdac %>% arrange(p.adjust) %>% as.data.frame()
 
+clust_pdac %>% filter(ID == "CPTAC_RNA_UP") %>% arrange(p.adjust) %>% as.data.frame()
+
+
 gs <- msigdb_gene_sets %>%
   dplyr::select(gs_name, gene_symbol)
 clust_all <- run_batch_enricher(clust_nodes, gs)
@@ -2391,5 +2534,81 @@ x
 x %>% arrange(p.adjust) %>% as.data.frame()
 x <- x %>% filter(p.adjust < 0.05, cluster_size >= 10) %>% select(ID, GeneRatio, p.adjust, Count, cluster_size, community)
 x %>% as.data.frame()
+
+
+clust_hallmark %>% arrange(p.adjust)
+
+x <- bind_cols(clust_hallmark, oddsratio=sapply(clust_hallmark$GeneRatio, function(x) eval(parse(text=x))) / sapply(clust_hallmark$BgRatio, function(x) eval(parse(text=x))))
+x %>% arrange(p.adjust)
+
+
+###################################################################
+#
+# Address reviewer comments that DE genes may not be expressed at
+# levels higher than signal background / limit of detection
+#
+###################################################################
+
+s <- select(samples, aoi_id, slide_id, histology, path, histpath)
+m <- select(counts_probe, -all_of(samples$aoi_id))
+x <- select(counts_probe, all_of(samples$aoi_id))
+g <- "KRT17"
+
+x <- get_bgsub_qnorm_cpm(counts_probe, samples)
+y <- x %>% 
+  filter((probe_type == 0) | (gene_symbol == g)) %>%
+  pivot_longer(samples$aoi_id, names_to="aoi_id", values_to="cpm") %>%
+  inner_join(s, by=c("aoi_id"="aoi_id"), suffix=c("_gene", "_aoi")) %>%
+  group_by(aoi_id, probe_type) %>%
+  summarise(histology = first(histology),
+            path = first(path),
+            slide = first(slide_id),
+            value = quantile(cpm, qc_negprobe_lod_quantile)) %>%
+  ungroup()
+y$probe_type <- if_else(y$probe_type == 0, "bg", "gene")
+
+# x <- sweep(x, 2, colSums(x) / 1e6, FUN="/")
+# y <- bind_cols(m, x)
+# y <- y %>% 
+#   filter((probe_type == 0) | (gene_symbol == g)) %>%
+#   pivot_longer(colnames(x), names_to="aoi_id", values_to="cpm") %>%
+#   inner_join(s, by=c("aoi_id"="aoi_id"), suffix=c("_gene", "_aoi")) %>%
+#   group_by(aoi_id, probe_type) %>%
+#   summarise(histology = first(histology),
+#             path = first(path),
+#             slide = first(slide_id),
+#             value = quantile(cpm, qc_negprobe_lod_quantile)) %>%
+#   ungroup()
+
+p <- ggplot(y, aes(x=reorder(aoi_id, value), y=log2(value), color=factor(probe_type))) + 
+  geom_point(size=2, alpha=0.8) +
+#  scale_y_log10() +
+  scale_color_manual(values = pals::cols25()) +
+  labs(color = "LOD", x="AOI", y="log2 Normalized CPM") +
+  theme_minimal() + 
+  theme(axis.text.x = element_blank()) +
+  # theme(axis.text.x = element_blank(),
+  #       panel.grid.major.x = element_blank(),
+  #       panel.grid.minor.x = element_blank()) +
+  facet_grid(~ histology, scales="free")
+p
+f <- file.path(plot_dir, "qc_bg_detection_krt17.pdf")
+ggsave(f, plot=p, device="pdf", width=6, height=3)
+
+y <- y %>% pivot_wider(id_cols = c(aoi_id, slide, path, histology),
+                       names_from = probe_type,
+                       values_from = value)
+
+table(y$histology, y$gene > y$bg)
+table(y$gene > y$bg)
+61 / (61+ 22)
+median(log2(y$bg))
+
+# p <- ggplot(y, aes(x=bg, y=gene, color=histology)) +
+#   geom_point() + 
+#   scale_color_manual(values=color_scales$histology) +
+#   scale_x_log10() +
+#   scale_y_log10() +
+#   geom_abline(slope=1, color="red", linetype="dashed")
 
 
